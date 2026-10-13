@@ -1,0 +1,16 @@
+export type Role = 'operations' | 'supplier' | 'buyer';
+export type Actor = { role: Role; entityId: string };
+export type Supplier = { id: string; name: string; category: string; contact: string; location: string; status: '待审核' | '已准入'; note: string };
+export type Buyer = { id: string; name: string; city: string; contact: string };
+export type Product = { id: string; supplierId: string; name: string; category: string; spec: string; unit: string; price: number; moq: number; stock: number; leadDays: number; status: '待审核' | '可供货' | '待补充'; note: string; artwork: string; updatedAt: string };
+export type Demand = { id: string; buyerId: string; title: string; category: string; quantity: number; budget: number; destination: string; dueDate: string; requirements: string; status: '待报价' | '已报价' | '已成交'; createdAt: string };
+export type Line = { productId: string; supplierId: string; name: string; spec: string; unit: string; artwork: string; quantity: number; unitPrice: number; unitCost?: number };
+export type Parties = { purchaser: string; exporter: string; importer: string; payee: string; delivery: string; settlement: string };
+export type Quote = { id: string; demandId: string; buyerId: string; lines: Line[]; shipping: number; tax: number; total: number; validUntil: string; status: '待确认' | '已接受'; parties: Parties; notes: string; createdAt: string };
+export type Order = { id: string; quoteId: string; demandId: string; buyerId: string; lines: Line[]; total: number; shipping: number; tax: number; destination: string; dueDate: string; status: '待确认' | '待启动' | '备货中' | '待验货' | '待发运' | '运输中' | '已交付' | '已关闭'; confirmedSuppliers: string[]; deliveredSuppliers: string[]; payment: '待核实' | '已核实'; paymentRef: string; logistics: '待集货' | '已集货' | '运输中' | '已签收'; customs: '待补资料' | '已放行'; customsRef: string; taxStatus: '待归档' | '已归档'; taxRef: string; inspection: '待验货' | '存在差异' | '已通过'; carrier: string; waybill: string; receiptRef: string; eta: string; parties: Parties; createdAt: string };
+export type Settlement = { id: string; orderId: string; supplierId: string; amount: number; reference: string; paidAt: string; fee: 0 };
+export type Issue = { id: string; orderId: string; title: string; detail: string; category: string; blocking: boolean; status: '待处理' | '已解决'; resolution: string; createdBy: Actor; createdAt: string };
+export type ServiceTask = { id: string; title: string; detail: string; actor: Actor; status: '待处理' | '已完成'; resolution: string; createdAt: string };
+export type AuditEvent = { id: string; action: string; targetId: string; detail: string; actor: Actor; at: string };
+export type SupplyState = { suppliers: Supplier[]; buyers: Buyer[]; products: Product[]; demands: Demand[]; quotes: Quote[]; orders: Order[]; settlements: Settlement[]; issues: Issue[]; serviceTasks: ServiceTask[]; events: AuditEvent[] };
+export type WorkspaceResponse = { state: SupplyState; revision: number; actor: Actor; mode: 'demo' };
