@@ -8,6 +8,13 @@
       "when": 1791851957097,
       "tag": "0000_tough_shadow_king",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1791860357213,
+      "tag": "0001_outstanding_the_professor",
+      "breakpoints": true
     }
   ]
 }

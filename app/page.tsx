@@ -1,7 +1,7 @@
-import SupplyApp from './supply-app';
-import { requireChatGPTUser } from './chatgpt-auth';
-export const dynamic = 'force-dynamic';
+import CatalogApp from "../components/catalog/catalog-app";
+import { requireChatGPTUser } from "./chatgpt-auth";
+export const dynamic = "force-dynamic";
 export default async function Home() {
-  const user = await requireChatGPTUser('/');
-  return <SupplyApp displayName={user.fullName || '我的工作空间'} />;
+  const user = await requireChatGPTUser("/");
+  return <CatalogApp displayName={user.displayName} />;
 }

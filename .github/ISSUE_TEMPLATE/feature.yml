@@ -1,0 +1,26 @@
+name: 开发任务
+description: 按里程碑拆分功能与验收
+body:
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: 里程碑
+      options:
+        - M1 商户与标准货盘
+        - M2 自动匹配组货
+        - M3 对外报价
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 业务场景与目标行为
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+      description: 写出可以观察或测试的结果
+    validations:
+      required: true

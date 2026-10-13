@@ -1,19 +1,76 @@
-import assert from 'node:assert/strict';
-const base = 'http://127.0.0.1:5178';
-const anon = await fetch(base+'/api/workspace');
-assert.equal(anon.status,401,'API requires sign-in');
-const login = await fetch(base+'/signin-with-chatgpt?return_to=/',{redirect:'manual'});
-const cookie = login.headers.getSetCookie().map(c=>c.split(';')[0]).join('; ');
-assert.ok(cookie,'local sign-in returned a development session');
-const headers = {cookie,'Content-Type':'application/json'};
-let res = await fetch(base+'/api/workspace',{headers});assert.equal(res.status,200);let ws=await res.json();
-const originalRevision=ws.revision;
-const write = (revision,action,payload,actor={role:'operations',entityId:'operations'},extra={}) => fetch(base+'/api/workspace',{method:'POST',headers:{...headers,...extra},body:JSON.stringify({revision,actor,action,payload})});
-res=await write(ws.revision,'createServiceTask',{title:'示例 API 验证',detail:'本地测试：验证数据库保存和版本冲突保护。'});assert.equal(res.status,200);ws=await res.json();assert.equal(ws.revision,originalRevision+1);
-res=await fetch(base+'/api/workspace',{headers});const persisted=await res.json();assert.equal(persisted.revision,ws.revision);assert.equal(persisted.state.serviceTasks[0].title,'示例 API 验证');
-res=await write(originalRevision,'createServiceTask',{title:'不应保存',detail:'过期版本'});assert.equal(res.status,409);
-res=await write(ws.revision,'reviewProduct',{id:'p-1',result:'可供货',note:'不应保存'},{role:'supplier',entityId:'sup-1'});assert.equal(res.status,403);
-res=await write(ws.revision,'createServiceTask',{title:'不应保存',detail:'跨站请求'},undefined,{Origin:'https://untrusted.example'});assert.equal(res.status,403);
-res=await fetch(base+'/api/workspace?role=supplier&entityId=sup-1',{headers});const supplier=await res.json();assert.ok(supplier.state.products.every(p=>p.supplierId==='sup-1'));assert.ok(supplier.state.orders.every(o=>o.lines.every(l=>l.supplierId==='sup-1')));
-res=await fetch(base+'/api/workspace?role=buyer&entityId=buyer-2',{headers});const buyer=await res.json();assert.ok(buyer.state.orders.every(o=>o.buyerId==='buyer-2'));assert.ok(buyer.state.products.every(p=>p.price===0));assert.equal(buyer.state.settlements.length,0);
-console.log('PASS: unauthenticated access, local sign-in, D1 persistence, optimistic concurrency, role restrictions, cross-origin write rejection, supplier isolation, buyer isolation.');
+import assert from "node:assert/strict";
+const base = "http://127.0.0.1:5178";
+assert.equal((await fetch(base + "/api/catalog")).status, 401);
+const login = await fetch(base + "/signin-with-chatgpt?return_to=/", {
+  redirect: "manual",
+});
+const cookie = login.headers
+  .getSetCookie()
+  .map((c) => c.split(";")[0])
+  .join("; ");
+assert.ok(cookie);
+const headers = { cookie, "Content-Type": "application/json" };
+let response = await fetch(base + "/api/catalog", { headers });
+assert.equal(response.status, 200);
+let data = await response.json();
+const post = (body, extra = {}) =>
+  fetch(base + "/api/catalog", {
+    method: "POST",
+    headers: { ...headers, ...extra },
+    body: JSON.stringify(body),
+  });
+if (!data.workspace) {
+  response = await post({
+    action: "createWorkspace",
+    name: "本地接口验证空间",
+    priceBasis: "示例人民币供货价",
+  });
+  assert.equal(response.status, 201);
+  data = await response.json();
+}
+const w = data.workspace;
+const payload = {
+  name: `示例接口商户-${Date.now()}`,
+  contact: "本地测试",
+  location: "示例档口",
+  categories: "示例品类",
+};
+const command = {
+  action: "registerMerchant",
+  payload,
+  workspaceId: w.id,
+  revision: w.revision,
+};
+response = await post(command);
+assert.equal(response.status, 200);
+const saved = await response.json();
+response = await fetch(base + `/api/catalog?workspaceId=${w.id}`, { headers });
+const persisted = await response.json();
+assert.equal(persisted.workspace.revision, saved.workspace.revision);
+assert.ok(
+  persisted.workspace.data.merchants.some((m) => m.name === payload.name),
+);
+assert.equal((await post(command)).status, 409);
+assert.equal(
+  (
+    await post({
+      ...command,
+      revision: saved.workspace.revision,
+      actor: { role: "operations" },
+    })
+  ).status,
+  400,
+);
+assert.equal(
+  (
+    await post(
+      { ...command, revision: saved.workspace.revision },
+      { Origin: "https://untrusted.example" },
+    )
+  ).status,
+  403,
+);
+assert.equal((await fetch(base + "/api/workspace", { headers })).status, 404);
+console.log(
+  "PASS: local sign-in, real D1 persistence, revision conflicts, forged role rejection, cross-origin rejection and retired prototype route.",
+);

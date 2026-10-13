@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "螺蛳湾 · 海外供货平台",
-  description: "商户免费入驻，面向海外渠道的供货与履约工作台。",
+  description: "商户免费入驻，建立标准 SKU 与多商户供货货盘。",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
