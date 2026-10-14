@@ -177,3 +177,55 @@ await apply("pauseOffer", { id: offer.id, expectedVersion: offer.version });
 console.log(
   "PASS: real local R2 upload and protected read, SKU association, quick quantity update, explicit renewal and pause. Validation offer left paused.",
 );
+
+const acceptPage = await fetch(base + "/accept");
+assert.equal(acceptPage.status, 200);
+assert.ok((await acceptPage.text()).includes("账号邀请与商户认领"));
+for (const payload of [
+  { kind: "claim", merchantId: merchant.id },
+  { kind: "operations", label: "本地验证运营邀请" },
+]) {
+  const issuedResponse = await post({
+    workspaceId: w.id,
+    revision: w.revision,
+    action: "issueAccessInvitation",
+    payload,
+  });
+  const issued = await issuedResponse.json();
+  assert.equal(issuedResponse.status, 200, issued.error);
+  w = issued.workspace;
+  assert.ok(issued.accessInvitationCode);
+  const preview = await post({
+    action: "inspectAccessInvitation",
+    invitationCode: issued.accessInvitationCode,
+  });
+  assert.equal(preview.status, 200);
+  assert.equal((await preview.json()).invitation.kind, payload.kind);
+  assert.ok(!JSON.stringify(w).includes("tokenHash"));
+  const selfClaim = await post({
+    action: "requestAccess",
+    invitationCode: issued.accessInvitationCode,
+    payload: { name: "测试负责人", contact: "本地验证" },
+  });
+  assert.equal(
+    selfClaim.status,
+    400,
+    "workspace owner cannot bind a second role to their account",
+  );
+  await apply("revokeAccessInvitation", {
+    id: w.data.accessInvitations[0].id,
+    note: "本地邀请验证结束，撤销测试链接",
+  });
+  assert.equal(
+    (
+      await post({
+        action: "inspectAccessInvitation",
+        invitationCode: issued.accessInvitationCode,
+      })
+    ).status,
+    410,
+  );
+}
+console.log(
+  "PASS: acceptance entry, real D1 claim/operator invitation persistence, role-conflict rejection, and revoked link rejection. Test invitations left revoked; multi-account flows covered by SQLite tests.",
+);

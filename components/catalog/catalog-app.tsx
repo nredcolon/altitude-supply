@@ -33,6 +33,7 @@ import {
   type SupplyFilter,
 } from "../../lib/catalog/maintenance";
 import { ImageField } from "./image-field";
+import { AccessManagement } from "./access-management";
 import type {
   CatalogResponse,
   Merchant,
@@ -62,6 +63,7 @@ const pageNames: Record<string, string> = {
   activity: "操作记录",
   detail: "SKU 供货详情",
   profile: "我的商户",
+  members: "账号与成员",
 };
 const categories = ["家居日用", "家纺布艺", "箱包配饰", "其他"];
 
@@ -112,7 +114,11 @@ export default function CatalogApp({
         `/api/catalog${id ? `?workspaceId=${encodeURIComponent(id)}` : ""}`,
       );
       const body = (await response.json()) as CatalogResponse;
-      if (!response.ok) throw new Error(body.error || "读取失败");
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403)
+          setResult({ workspaces: [] });
+        throw new Error(body.error || "读取失败");
+      }
       setResult(body);
     } catch (e) {
       setError((e as Error).message);
@@ -143,7 +149,11 @@ export default function CatalogApp({
       setInvitationCode(saved);
       setShowEntry(true);
     }
-    if (authenticated) void load();
+    if (authenticated)
+      void load(
+        new URLSearchParams(window.location.search).get("workspaceId") ||
+          undefined,
+      );
     else setLoading(false);
   }, [authenticated, entry]);
   useEffect(() => {
@@ -153,7 +163,7 @@ export default function CatalogApp({
     }
   }, [toast]);
   async function submit(body: unknown) {
-    if (busy) return;
+    if (busy) return false;
     setBusy(true);
     setError("");
     try {
@@ -179,8 +189,10 @@ export default function CatalogApp({
       setDialog(null);
       setShowEntry(false);
       setToast("已保存");
+      return true;
     } catch (e) {
       setError((e as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -848,6 +860,25 @@ export default function CatalogApp({
                   准入 / 暂停管理
                 </button>
               )}
+              {ops && !m.userId && (
+                <button
+                  className="btn"
+                  disabled={busy}
+                  onClick={() =>
+                    command("issueAccessInvitation", {
+                      kind: "claim",
+                      merchantId: m.id,
+                    })
+                  }
+                >
+                  生成专属认领链接
+                </button>
+              )}
+              {ops && !m.userId && (
+                <small className="muted">
+                  重新生成会撤销该商户之前的认领邀请及待核实申请。
+                </small>
+              )}
             </article>
           ))}
         {!data.merchants.length && (
@@ -875,6 +906,15 @@ export default function CatalogApp({
           </section>
         )}
       </div>
+    );
+  } else if (page === "members" && ops) {
+    content = (
+      <AccessManagement
+        data={data}
+        busy={busy}
+        error={error}
+        command={command}
+      />
     );
   } else if (page === "skus") {
     content = (
@@ -1164,6 +1204,11 @@ export default function CatalogApp({
                       icon: ClipboardList,
                     },
                     { id: "activity", name: "操作记录", icon: ShieldCheck },
+                    {
+                      id: "members",
+                      name: `账号与成员${data.accessInvitations.some((i) => i.status === "requested") ? " · 待核实" : ""}`,
+                      icon: Users,
+                    },
                   ]
                 : [
                     { id: "overview", name: "首页", icon: Layers3 },
@@ -1366,6 +1411,50 @@ export default function CatalogApp({
                   className="text-button"
                   onClick={() =>
                     setResult({ ...result, invitationCode: undefined })
+                  }
+                >
+                  收起邀请
+                </button>
+              </section>
+            )}
+            {result.accessInvitationCode && (
+              <section className="invitation panel">
+                <b>专属账号邀请 · {result.accessInvitationLabel}</b>
+                <p>
+                  仅交给对应受邀人。有效至{" "}
+                  {new Date(result.accessInvitationExpiresAt!).toLocaleString(
+                    "zh-CN",
+                    { timeZone: "Asia/Shanghai" },
+                  )}
+                  ，对方申请后请到「账号与成员」核实。链接仅本次显示，需重新生成才能再次获取。
+                </p>
+                <div>
+                  <input
+                    aria-label="专属账号邀请链接"
+                    readOnly
+                    value={`${origin}/accept#access=${result.accessInvitationCode}`}
+                  />
+                  <button
+                    className="btn"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(
+                          `${window.location.origin}/accept#access=${result.accessInvitationCode}`,
+                        );
+                        setToast("专属邀请链接已复制");
+                      } catch {
+                        setToast("请选中邀请链接手动复制");
+                      }
+                    }}
+                  >
+                    <Copy size={15} />
+                    复制链接
+                  </button>
+                </div>
+                <button
+                  className="text-button"
+                  onClick={() =>
+                    setResult({ ...result, accessInvitationCode: undefined })
                   }
                 >
                   收起邀请

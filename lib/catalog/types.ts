@@ -69,12 +69,55 @@ export interface CatalogState {
   skus: Sku[];
   offers: Offer[];
   events: CatalogEvent[];
+  members?: OperationsMember[];
+  accessInvitations?: AccessInvitation[];
 }
 
+export interface OperationsMember {
+  id: string;
+  userId: string;
+  name: string;
+  contact: string;
+  status: "active" | "disabled";
+  joinedAt: string;
+}
+export interface AccessInvitation {
+  id: string;
+  tokenHash: string;
+  kind: "claim" | "operations";
+  merchantId: string | null;
+  label: string;
+  status: "issued" | "requested" | "accepted" | "revoked";
+  expiresAt: string;
+  createdAt: string;
+  requestedBy: string | null;
+  applicantName: string;
+  applicantContact: string;
+  reviewNote: string;
+}
+export type InvitationView = Omit<
+  AccessInvitation,
+  "tokenHash" | "requestedBy"
+>;
+export interface AccessInvitationPreview {
+  workspaceId: string;
+  workspaceName: string;
+  label: string;
+  kind: AccessInvitation["kind"];
+  status: AccessInvitation["status"];
+  expiresAt: string;
+}
 export type Access =
-  | { role: "operations"; merchantId: null }
+  | { role: "operations"; merchantId: null; isOwner: boolean }
   | { role: "merchant"; merchantId: string };
-export type CatalogView = Omit<CatalogState, "ownerId"> & { access: Access };
+export type CatalogView = Omit<
+  CatalogState,
+  "ownerId" | "members" | "accessInvitations"
+> & {
+  access: Access;
+  members: Omit<OperationsMember, "userId">[];
+  accessInvitations: InvitationView[];
+};
 export interface WorkspaceSummary {
   id: string;
   name: string;
@@ -85,5 +128,8 @@ export interface CatalogResponse {
   workspace?: { id: string; name: string; revision: number; data: CatalogView };
   invitationCode?: string;
   invitationExpiresAt?: string;
+  accessInvitationCode?: string;
+  accessInvitationExpiresAt?: string;
+  accessInvitationLabel?: string;
   error?: string;
 }

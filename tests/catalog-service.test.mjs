@@ -38,7 +38,7 @@ function setup(bucket) {
   };
   const service = catalogService(db, bucket);
   const now = new Date("2026-10-13T08:00:00Z");
-  const call = async (user, input, query = "", headers = {}) => {
+  const call = async (user, input, query = "", headers = {}, at = now) => {
     const request = new Request(
       `http://localhost/api/catalog${query}`,
       input
@@ -49,7 +49,7 @@ function setup(bucket) {
           }
         : { headers },
     );
-    const result = await service.handle(request, user, now);
+    const result = await service.handle(request, user, at);
     return { status: result.status, body: await result.json() };
   };
   return { call, sqlite, db };
@@ -70,6 +70,461 @@ const cmd = (workspace, action, payload) => ({
   revision: workspace.revision,
   action,
   payload,
+});
+
+const claimant = { name: "认领测试本人", contact: "核实用测试电话" };
+async function issued(setupResult, kind = "claim") {
+  const { call } = setupResult;
+  let w = (await call("owner", create)).body.workspace;
+  if (kind === "claim")
+    w = (await call("owner", cmd(w, "registerMerchant", application))).body
+      .workspace;
+  const result = await call(
+    "owner",
+    cmd(
+      w,
+      "issueAccessInvitation",
+      kind === "claim"
+        ? { kind, merchantId: w.data.merchants[0].id }
+        : { kind, label: "测试运营同事" },
+    ),
+  );
+  assert.equal(result.status, 200, result.body.error);
+  return result.body;
+}
+const requestAccess = (invitationCode) => ({
+  action: "requestAccess",
+  invitationCode,
+  payload: claimant,
+});
+const inspectAccess = (invitationCode) => ({
+  action: "inspectAccessInvitation",
+  invitationCode,
+});
+
+test("代录商户认领需核实，账号绑定保留商户状态、供货与历史，不泄露邀请凭据", async () => {
+  const s = setup();
+  const { call, sqlite } = s;
+  const invitation = await issued(s);
+  const code = invitation.accessInvitationCode;
+  const w = invitation.workspace;
+  const raw = JSON.parse(
+    sqlite.prepare("SELECT data FROM catalog_workspaces").get().data,
+  );
+  assert.notEqual(raw.accessInvitations[0].tokenHash, code);
+  assert.ok(!JSON.stringify(w).includes("tokenHash"));
+  assert.ok(!JSON.stringify(w).includes("requestedBy"));
+  assert.equal((await call(null, inspectAccess(code))).status, 401);
+  const preview = await call("claimant", inspectAccess(code));
+  assert.equal(preview.body.invitation.label, application.name);
+  assert.ok(!JSON.stringify(preview.body).includes(application.contact));
+  assert.equal((await call("claimant", requestAccess(code))).status, 200);
+  assert.equal((await call("claimant")).body.workspaces.length, 0);
+  assert.equal(
+    (await call("claimant", null, `?workspaceId=${w.id}`)).status,
+    403,
+  );
+  const current = (await call("owner")).body.workspace;
+  assert.equal(
+    (
+      await call(
+        "owner",
+        cmd(current, "reviewAccessRequest", {
+          id: current.data.accessInvitations[0].id,
+          approve: true,
+          note: "",
+        }),
+      )
+    ).status,
+    400,
+  );
+  const approved = await call(
+    "owner",
+    cmd(current, "reviewAccessRequest", {
+      id: current.data.accessInvitations[0].id,
+      approve: true,
+      note: "与原登记联系人核实",
+    }),
+  );
+  assert.equal(approved.status, 200, approved.body.error);
+  const owned = (await call("claimant")).body.workspace;
+  assert.equal(owned.data.access.role, "merchant");
+  assert.equal(owned.data.merchants[0].id, w.data.merchants[0].id);
+  assert.equal(
+    owned.data.merchants[0].status,
+    "pending",
+    "claim does not bypass merchant approval",
+  );
+  assert.deepEqual(owned.data.offers, w.data.offers);
+  assert.equal(owned.data.members.length, 0);
+  assert.equal(owned.data.accessInvitations.length, 0);
+  assert.ok(
+    w.data.events.every((before) =>
+      owned.data.events.some((e) => e.id === before.id),
+    ),
+    "retains all original merchant history",
+  );
+  assert.equal(
+    (await call("claimant", inspectAccess(code))).body.invitation.status,
+    "accepted",
+  );
+  assert.equal((await call("another", inspectAccess(code))).status, 403);
+  assert.equal((await call("claimant", requestAccess(code))).status, 409);
+  assert.equal(
+    (
+      await call(
+        "owner",
+        cmd(approved.body.workspace, "issueAccessInvitation", {
+          kind: "claim",
+          merchantId: w.data.merchants[0].id,
+        }),
+      )
+    ).status,
+    400,
+  );
+  sqlite.close();
+});
+
+test("运营成员必须由负责人核实，不能升级权限；停用立即影响读写和图片接口", async () => {
+  const s = setup();
+  const { call, sqlite, db } = s;
+  const invitation = await issued(s, "operations");
+  const id = invitation.workspace.id;
+  assert.equal(
+    (await call("staff", requestAccess(invitation.accessInvitationCode)))
+      .status,
+    200,
+  );
+  assert.equal((await call("staff", null, `?workspaceId=${id}`)).status, 403);
+  let w = (await call("owner")).body.workspace;
+  w = (
+    await call(
+      "owner",
+      cmd(w, "reviewAccessRequest", {
+        id: w.data.accessInvitations[0].id,
+        approve: true,
+        note: "负责人确认同事身份",
+      }),
+    )
+  ).body.workspace;
+  let staff = (await call("staff")).body;
+  assert.equal(staff.workspaces[0].role, "operations");
+  assert.equal(staff.workspace.data.access.isOwner, false);
+  assert.equal(staff.workspace.data.members.length, 0);
+  assert.equal(staff.workspace.data.accessInvitations.length, 0);
+  assert.equal(
+    (
+      await call(
+        "staff",
+        cmd(w, "issueAccessInvitation", {
+          kind: "operations",
+          label: "擅自邀请",
+        }),
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await call(
+        "staff",
+        cmd(w, "setMemberStatus", {
+          id: w.data.members[0].id,
+          status: "disabled",
+          note: "越权",
+        }),
+      )
+    ).status,
+    403,
+  );
+  w = (await call("staff", cmd(w, "registerMerchant", application))).body
+    .workspace;
+  assert.equal(
+    (
+      await call(
+        "staff",
+        cmd(w, "issueAccessInvitation", {
+          kind: "claim",
+          merchantId: w.data.merchants[0].id,
+        }),
+      )
+    ).status,
+    200,
+  );
+  w = (await call("owner")).body.workspace;
+  const memberId = w.data.members[0].id;
+  const disabled = await call(
+    "owner",
+    cmd(w, "setMemberStatus", {
+      id: memberId,
+      status: "disabled",
+      note: "工作交接完毕",
+    }),
+  );
+  assert.equal(disabled.status, 200);
+  assert.equal((await call("staff")).body.workspaces.length, 0);
+  assert.equal((await call("staff", null, `?workspaceId=${id}`)).status, 403);
+  assert.equal(
+    (
+      await call(
+        "staff",
+        cmd(w, "registerMerchant", { ...application, name: "停用后写入" }),
+      )
+    ).status,
+    403,
+  );
+  const image = await catalogImages(db, {}).handle(
+    new Request(`http://localhost/api/catalog/images?workspaceId=${id}`, {
+      method: "POST",
+      body: "test",
+    }),
+    "staff",
+  );
+  assert.equal(image.status, 403);
+  assert.equal(
+    (
+      await call(
+        "owner",
+        cmd(disabled.body.workspace, "setMemberStatus", {
+          id: memberId,
+          status: "active",
+          note: "负责人确认恢复工作",
+        }),
+      )
+    ).status,
+    200,
+  );
+  assert.equal((await call("staff", null, `?workspaceId=${id}`)).status, 200);
+  assert.equal(
+    (await call("staff", create)).status,
+    201,
+    "staff can separately own another workspace",
+  );
+  sqlite.close();
+});
+
+test("认领邀请可撤销、重发和过期，通用入驻邀请码不混用，旧数据无需迁移", async () => {
+  const s = setup();
+  const { call, sqlite } = s;
+  let result = await issued(s);
+  const first = result.accessInvitationCode;
+  const id = result.workspace.id;
+  assert.equal(
+    (
+      await call("new", {
+        action: "applyMerchant",
+        invitationCode: first,
+        payload: application,
+      })
+    ).status,
+    400,
+  );
+  const rotated = await call(
+    "owner",
+    cmd(result.workspace, "rotateInvitation", {}),
+  );
+  assert.equal(
+    (await call("new", inspectAccess(rotated.body.invitationCode))).status,
+    404,
+  );
+  result = (
+    await call(
+      "owner",
+      cmd(rotated.body.workspace, "issueAccessInvitation", {
+        kind: "claim",
+        merchantId: result.workspace.data.merchants[0].id,
+      }),
+    )
+  ).body;
+  assert.equal((await call("new", inspectAccess(first))).status, 410);
+  assert.equal(
+    (
+      await call(
+        "new",
+        requestAccess(result.accessInvitationCode),
+        "",
+        {},
+        new Date("2026-10-20T08:00:00Z"),
+      )
+    ).status,
+    410,
+  );
+  assert.equal(
+    (await call("new", requestAccess(result.accessInvitationCode))).status,
+    200,
+  );
+  let w = (await call("owner")).body.workspace;
+  assert.equal(
+    (
+      await call(
+        "owner",
+        cmd(w, "reviewAccessRequest", {
+          id: w.data.accessInvitations[0].id,
+          approve: true,
+          note: "已过期",
+        }),
+        "",
+        {},
+        new Date("2026-10-20T08:00:00Z"),
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await call(
+        "owner",
+        cmd(w, "revokeAccessInvitation", {
+          id: w.data.accessInvitations[0].id,
+          note: "认领人不符",
+        }),
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await call("new", inspectAccess(result.accessInvitationCode))).status,
+    410,
+  );
+  const raw = JSON.parse(
+    sqlite.prepare("SELECT data FROM catalog_workspaces WHERE id = ?").get(id)
+      .data,
+  );
+  delete raw.members;
+  delete raw.accessInvitations;
+  sqlite
+    .prepare("UPDATE catalog_workspaces SET data = ? WHERE id = ?")
+    .run(JSON.stringify(raw), id);
+  w = (await call("owner")).body.workspace;
+  assert.deepEqual(w.data.members, []);
+  assert.deepEqual(w.data.accessInvitations, []);
+  assert.equal(
+    (
+      await call(
+        "owner",
+        cmd(w, "issueAccessInvitation", {
+          kind: "operations",
+          label: "旧空间新增成员",
+        }),
+      )
+    ).status,
+    200,
+  );
+  sqlite.close();
+});
+
+test("并发认领只保留一个申请；并发确认和撤销不会同时成功", async () => {
+  const s = setup();
+  const { call, sqlite } = s;
+  const invitation = await issued(s);
+  const responses = await Promise.all([
+    call("first", requestAccess(invitation.accessInvitationCode)),
+    call("second", requestAccess(invitation.accessInvitationCode)),
+  ]);
+  assert.equal(responses.filter((r) => r.status === 200).length, 1);
+  assert.ok(
+    responses.some((r) => [403, 409].includes(r.status)),
+    "loser is rejected before write or by revision conflict",
+  );
+  const winner = responses[0].status === 200 ? "first" : "second";
+  const loser = winner === "first" ? "second" : "first";
+  assert.equal(
+    (await call(loser, inspectAccess(invitation.accessInvitationCode))).status,
+    403,
+  );
+  const w = (await call("owner")).body.workspace;
+  const id = w.data.accessInvitations[0].id;
+  const reviews = await Promise.all([
+    call(
+      "owner",
+      cmd(w, "reviewAccessRequest", { id, approve: true, note: "确认本人" }),
+    ),
+    call("owner", cmd(w, "revokeAccessInvitation", { id, note: "停止交接" })),
+  ]);
+  assert.deepEqual(reviews.map((r) => r.status).sort(), [200, 409]);
+  const raw = JSON.parse(
+    sqlite.prepare("SELECT data FROM catalog_workspaces").get().data,
+  );
+  assert.equal(
+    Boolean(raw.merchants[0].userId),
+    raw.accessInvitations[0].status === "accepted",
+  );
+  assert.equal(raw.accessInvitations.filter((i) => i.requestedBy).length, 1);
+  sqlite.close();
+});
+
+test("成员管理拒绝跨空间操作、商户提权及客户端指定绑定身份", async () => {
+  const s = setup();
+  const { call, sqlite } = s;
+  const invitation = await issued(s);
+  const w = invitation.workspace;
+  const other = (await call("otherOwner", create)).body.workspace;
+  assert.equal(
+    (
+      await call(
+        "otherOwner",
+        cmd(w, "revokeAccessInvitation", {
+          id: w.data.accessInvitations[0].id,
+          note: "越权",
+        }),
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await call(
+        "otherOwner",
+        cmd(other, "reviewAccessRequest", {
+          id: w.data.accessInvitations[0].id,
+          approve: true,
+          note: "跨空间",
+        }),
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await call("new", {
+        ...requestAccess(invitation.accessInvitationCode),
+        payload: { ...claimant, userId: "victim" },
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await call("new", requestAccess(invitation.accessInvitationCode), "", {
+        Origin: "https://untrusted.example",
+      })
+    ).status,
+    403,
+  );
+  const rotated = (await call("owner", cmd(w, "rotateInvitation", {}))).body;
+  const merchant = await call("merchant", {
+    action: "applyMerchant",
+    invitationCode: rotated.invitationCode,
+    payload: { ...application, name: "另一商户" },
+  });
+  assert.equal(
+    (
+      await call(
+        "merchant",
+        cmd(merchant.body.workspace, "issueAccessInvitation", {
+          kind: "operations",
+          label: "提权",
+        }),
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await call("merchant", requestAccess(invitation.accessInvitationCode)))
+      .status,
+    400,
+  );
+  sqlite.close();
 });
 
 test("未登录拒绝访问；运营空间不自动创建且从空数据开始", async () => {

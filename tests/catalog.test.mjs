@@ -11,6 +11,10 @@ import {
   supplyHealth,
   matchesSupplyFilter,
 } from "../lib/catalog/maintenance.ts";
+import {
+  applyMembershipCommand,
+  requestMembership,
+} from "../lib/catalog/membership.ts";
 
 const now = new Date("2026-10-13T08:00:00Z");
 const merchant = {
@@ -476,4 +480,133 @@ test("生效 SKU 只有运营可维护图片且不改商品身份", () => {
   assert.equal(changed.skus[0].fingerprint, s.skus[0].fingerprint);
   assert.equal(changed.skus[0].status, "active");
   assert.equal(changed.skus[0].imageUrl, payload.imageUrl);
+});
+
+test("认领已准入档案完整保留有效供货，绑定后商户只能维护自己的原报价", () => {
+  const original = activeOffer();
+  // Simulate an operations-entered merchant with existing approved supply.
+  original.merchants[0].userId = null;
+  const tokenHash = "a".repeat(64);
+  const invited = applyMembershipCommand(
+    original,
+    "owner",
+    "issueAccessInvitation",
+    { kind: "claim", merchantId: original.merchants[0].id },
+    now,
+    tokenHash,
+  );
+  const requested = requestMembership(
+    invited,
+    tokenHash,
+    "newMerchant",
+    { name: "档口本人", contact: "测试电话" },
+    now,
+  );
+  const bound = applyMembershipCommand(
+    requested,
+    "owner",
+    "reviewAccessRequest",
+    {
+      id: requested.accessInvitations[0].id,
+      approve: true,
+      note: "原联系人当面核实",
+    },
+    now,
+  );
+  assert.deepEqual(bound.offers, original.offers);
+  assert.deepEqual(bound.skus, original.skus);
+  assert.equal(bound.merchants.length, original.merchants.length);
+  assert.equal(bound.merchants[0].status, "active");
+  assert.equal(offerAvailability(bound, bound.offers[0], now), "可参与匹配");
+  const updated = act(
+    bound,
+    "updateOfferTerms",
+    {
+      id: bound.offers[0].id,
+      expectedVersion: bound.offers[0].version,
+      unitPrice: 1080,
+    },
+    "newMerchant",
+  );
+  assert.equal(updated.offers[0].unitPrice, 1080);
+  assert.equal(updated.offers[0].id, original.offers[0].id);
+  assert.throws(
+    () => act(bound, "saveOffer", offerFor(bound, 1), "newMerchant"),
+    /其他商户/,
+  );
+  assert.equal(
+    original.merchants[0].userId,
+    null,
+    "original aggregate is immutable",
+  );
+});
+
+test("绑定确认时再次核实账号状态，拒绝双重身份且失败不污染原记录", () => {
+  let s = applyCatalogCommand(
+    emptyCatalog("owner", "人民币供货价"),
+    "owner",
+    "registerMerchant",
+    merchant,
+    now,
+  );
+  const tokenHash = "b".repeat(64);
+  s = applyMembershipCommand(
+    s,
+    "owner",
+    "issueAccessInvitation",
+    { kind: "claim", merchantId: s.merchants[0].id },
+    now,
+    tokenHash,
+  );
+  s = requestMembership(
+    s,
+    tokenHash,
+    "applicant",
+    { name: "申请人", contact: "测试电话" },
+    now,
+  );
+  s = applyApplication(
+    s,
+    "applicant",
+    { ...merchant, name: "申请期间另行入驻" },
+    now,
+  );
+  const before = structuredClone(s);
+  assert.throws(
+    () =>
+      applyMembershipCommand(
+        s,
+        "owner",
+        "reviewAccessRequest",
+        { id: s.accessInvitations[0].id, approve: true, note: "尝试重复绑定" },
+        now,
+      ),
+    /已绑定/,
+  );
+  assert.deepEqual(s, before);
+  const member = {
+    id: "member_test",
+    userId: "staff",
+    name: "停用同事",
+    contact: "测试",
+    status: "disabled",
+    joinedAt: now.toISOString(),
+  };
+  s.members = [member];
+  assert.throws(
+    () =>
+      applyApplication(s, "staff", { ...merchant, name: "换个身份入驻" }, now),
+    /运营账号/,
+  );
+  assert.throws(
+    () =>
+      requestMembership(
+        s,
+        tokenHash,
+        "staff",
+        { name: "换个身份", contact: "测试电话" },
+        now,
+      ),
+    /其他账号/,
+  );
 });

@@ -1922,3 +1922,119 @@ footer button {
     white-space: normal;
   }
 }
+/* Account handover shares the merchant workspace's visual language. */
+.access-management {
+  display: grid;
+  gap: 20px;
+}
+.access-intro {
+  padding: 24px;
+}
+.access-intro h2 {
+  margin-bottom: 12px;
+}
+.access-intro > p {
+  line-height: 1.8;
+  margin: 10px 0;
+}
+.access-invite-form {
+  display: grid;
+  gap: 14px;
+  max-width: 600px;
+  margin-top: 20px;
+}
+.access-invite-form .btn {
+  justify-self: start;
+}
+.access-list {
+  display: grid;
+  margin-top: 16px;
+}
+.access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 0;
+  border-top: 1px solid #e5e9e7;
+}
+.access-row p {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.access-row small {
+  color: #667873;
+}
+.access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.accept-page {
+  min-height: 100dvh;
+  padding: 64px 20px;
+  background: #f4f7f5;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+.accept-card {
+  width: 100%;
+  max-width: 620px;
+  padding: 36px;
+}
+.accept-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  color: #135747;
+  text-decoration: none;
+}
+.accept-card h1 {
+  margin: 24px 0 12px;
+  font-size: 28px;
+}
+.accept-card p {
+  line-height: 1.8;
+  margin: 12px 0;
+}
+.accept-card form {
+  display: grid;
+  gap: 18px;
+  margin: 24px 0;
+}
+.accept-card > .btn,
+.accept-card > .text-button {
+  margin-top: 16px;
+  margin-right: 12px;
+}
+.accept-card .btn {
+  justify-content: center;
+}
+.accept-summary {
+  background: #f0f5f2;
+  padding: 20px;
+  margin: 24px 0;
+  border-radius: 12px;
+}
+.accept-summary h2 {
+  margin-top: 8px;
+}
+@media (max-width: 700px) {
+  .access-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .access-intro {
+    padding: 20px;
+  }
+  .accept-page {
+    padding: 20px 12px;
+  }
+  .accept-card {
+    padding: 24px 20px;
+  }
+}

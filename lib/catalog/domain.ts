@@ -99,11 +99,19 @@ export function emptyCatalog(
     skus: [],
     offers: [],
     events: [],
+    members: [],
+    accessInvitations: [],
   };
 }
 
 export function accessFor(state: CatalogState, userId: string): Access {
-  if (state.ownerId === userId) return { role: "operations", merchantId: null };
+  if (state.ownerId === userId)
+    return { role: "operations", merchantId: null, isOwner: true };
+  const member = state.members?.find((m) => m.userId === userId);
+  if (member) {
+    ensure(member.status === "active", "你的运营权限已停用，请联系负责人", 403);
+    return { role: "operations", merchantId: null, isOwner: false };
+  }
   const merchant = state.merchants.find((m) => m.userId === userId);
   ensure(merchant, "你没有这个运营空间的访问权限", 403);
   return { role: "merchant", merchantId: merchant.id };
@@ -111,7 +119,12 @@ export function accessFor(state: CatalogState, userId: string): Access {
 
 export function viewCatalog(state: CatalogState, userId: string): CatalogView {
   const access = accessFor(state, userId);
-  const { ownerId: _owner, ...data } = structuredClone(state);
+  const {
+    ownerId: _owner,
+    members = [],
+    accessInvitations = [],
+    ...data
+  } = structuredClone(state);
   if (access.role === "merchant") {
     data.merchants = data.merchants.filter((m) => m.id === access.merchantId);
     data.skus = data.skus.filter(
@@ -133,7 +146,23 @@ export function viewCatalog(state: CatalogState, userId: string): CatalogView {
     ...e,
     actorId: e.actorId === userId ? "me" : "platform",
   }));
-  return { ...data, access };
+  return {
+    ...data,
+    access,
+    members:
+      access.role === "operations" && access.isOwner
+        ? members.map(({ userId: _user, ...member }) => member)
+        : [],
+    accessInvitations:
+      access.role === "operations"
+        ? accessInvitations
+            .filter((i) => access.isOwner || i.kind === "claim")
+            .map(
+              ({ tokenHash: _hash, requestedBy: _requester, ...invitation }) =>
+                invitation,
+            )
+        : [],
+  };
 }
 
 export function offerAvailability(
@@ -162,7 +191,7 @@ export function offerAvailability(
   return "可参与匹配";
 }
 
-function appendEvent(
+export function appendEvent(
   state: CatalogState,
   actorId: string,
   merchantId: string | null,
@@ -189,6 +218,10 @@ export function applyApplication(
   now = new Date(),
 ): CatalogState {
   ensure(original.ownerId !== userId, "运营账号无需申请成为本空间商户");
+  ensure(
+    !original.members?.some((m) => m.userId === userId),
+    "运营账号不能同时绑定本空间商户",
+  );
   ensure(
     !original.merchants.some((m) => m.userId === userId),
     "你已提交入驻申请",

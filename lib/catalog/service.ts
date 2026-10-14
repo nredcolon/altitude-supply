@@ -10,6 +10,12 @@ import {
 } from "./domain.ts";
 import type { CatalogResponse, CatalogState, WorkspaceSummary } from "./types";
 import { catalogImages } from "./images.ts";
+import {
+  applyMembershipCommand,
+  inspectInvitation,
+  membershipActions,
+  requestMembership,
+} from "./membership.ts";
 
 interface Row {
   id: string;
@@ -54,17 +60,28 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
   async function list(userId: string): Promise<WorkspaceSummary[]> {
     const result = await db
       .prepare(
-        `SELECT id, name, owner_id FROM catalog_workspaces AS w
+        `SELECT id, name, owner_id, EXISTS (
+          SELECT 1 FROM json_each(w.data, '$.members') AS member
+          WHERE json_extract(member.value, '$.userId') = ? AND json_extract(member.value, '$.status') = 'active'
+        ) AS is_operator FROM catalog_workspaces AS w
       WHERE owner_id = ? OR EXISTS (
         SELECT 1 FROM json_each(w.data, '$.merchants') AS m WHERE json_extract(m.value, '$.userId') = ?
+      ) OR EXISTS (
+        SELECT 1 FROM json_each(w.data, '$.members') AS member
+        WHERE json_extract(member.value, '$.userId') = ? AND json_extract(member.value, '$.status') = 'active'
       ) ORDER BY updated_at DESC`,
       )
-      .bind(userId, userId)
-      .all<{ id: string; name: string; owner_id: string }>();
+      .bind(userId, userId, userId, userId)
+      .all<{
+        id: string;
+        name: string;
+        owner_id: string;
+        is_operator: number;
+      }>();
     return result.results.map((r) => ({
       id: r.id,
       name: r.name,
-      role: r.owner_id === userId ? "operations" : "merchant",
+      role: r.owner_id === userId || r.is_operator ? "operations" : "merchant",
     }));
   }
   async function getRow(id: string) {
@@ -144,7 +161,10 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
             .strict()
             .parse(input);
           ensure(
-            !(await list(userId)).some((w) => w.role === "operations"),
+            !(await db
+              .prepare("SELECT id FROM catalog_workspaces WHERE owner_id = ?")
+              .bind(userId)
+              .first()),
             "该账号已创建运营空间",
           );
           const id = crypto.randomUUID();
@@ -178,6 +198,44 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
             201,
           );
         }
+        if (
+          ["inspectAccessInvitation", "requestAccess"].includes(input.action)
+        ) {
+          const p = z
+            .object({
+              action: z.enum(["inspectAccessInvitation", "requestAccess"]),
+              invitationCode: codeSchema,
+              payload: z.unknown().optional(),
+            })
+            .strict()
+            .parse(input);
+          const tokenHash = await hash(p.invitationCode);
+          const row = await db
+            .prepare(
+              `SELECT id, owner_id, name, revision, data FROM catalog_workspaces AS w
+            WHERE EXISTS (SELECT 1 FROM json_each(w.data, '$.accessInvitations') AS i
+              WHERE json_extract(i.value, '$.tokenHash') = ?)`,
+            )
+            .bind(tokenHash)
+            .first<Row>();
+          ensure(row, "邀请无效，请联系运营重新发送", 404);
+          let state: CatalogState = JSON.parse(row.data);
+          if (p.action === "requestAccess") {
+            state = requestMembership(state, tokenHash, userId, p.payload, now);
+            await save(row, state, now);
+          }
+          const invitation = inspectInvitation(state, tokenHash, userId, now);
+          return reply({
+            invitation: {
+              workspaceId: row.id,
+              workspaceName: row.name,
+              label: invitation.label,
+              kind: invitation.kind,
+              status: invitation.status,
+              expiresAt: invitation.expiresAt,
+            },
+          });
+        }
         if (input.action === "applyMerchant") {
           const p = z
             .object({
@@ -206,6 +264,28 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
         const state: CatalogState = JSON.parse(row.data);
         const access = accessFor(state, userId);
         ensure(row.revision === p.revision, "数据已更新，请刷新后重试", 409);
+        if (membershipActions.has(p.action)) {
+          const code =
+            p.action === "issueAccessInvitation" ? token() : undefined;
+          const next = applyMembershipCommand(
+            state,
+            userId,
+            p.action,
+            p.payload,
+            now,
+            code ? await hash(code) : undefined,
+          );
+          await save(row, next, now);
+          const invitation = code ? next.accessInvitations?.[0] : undefined;
+          return reply({
+            ...(await response(userId, row.id)),
+            ...(code && {
+              accessInvitationCode: code,
+              accessInvitationExpiresAt: invitation!.expiresAt,
+              accessInvitationLabel: invitation!.label,
+            }),
+          });
+        }
         if (
           ["submitSku", "updateSku", "updateSkuImage"].includes(p.action) &&
           p.payload &&
