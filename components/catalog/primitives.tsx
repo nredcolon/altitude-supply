@@ -98,7 +98,7 @@ export function Modal({
       >
         <header>
           <div>
-            <small>LUOSI SUPPLY</small>
+            <small>山海供 · SHANHAI SUPPLY</small>
             <h2>{title}</h2>
           </div>
           <button className="icon-button" onClick={close} aria-label="关闭">

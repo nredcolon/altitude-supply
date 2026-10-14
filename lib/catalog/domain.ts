@@ -53,7 +53,15 @@ const skuInput = z
     imageUrl: z
       .string()
       .max(2000)
-      .refine((v) => !v || /^https:\/\//i.test(v), "图片链接须为 HTTPS 地址")
+      .refine(
+        (v) =>
+          !v ||
+          /^https:\/\//i.test(v) ||
+          /^\/api\/catalog\/images\/[a-f0-9-]{36}\?workspaceId=[a-f0-9-]{36}$/.test(
+            v,
+          ),
+        "请上传图片或填写 HTTPS 图片地址",
+      )
       .default(""),
   })
   .strict();
@@ -238,6 +246,138 @@ export function applyCatalogCommand(
   let detail = "";
   let label = "";
   switch (action) {
+    case "updateSkuImage": {
+      const p = z
+        .object({ id: required, imageUrl: skuInput.shape.imageUrl })
+        .strict()
+        .parse(payload);
+      const sku = state.skus.find((s) => s.id === p.id);
+      ensure(sku, "SKU 不存在", 404);
+      if (sku.status === "active") ops();
+      else {
+        approvedMerchant();
+        ensure(
+          access.role === "operations" || sku.submittedBy === userId,
+          "不能修改其他商户商品图片",
+          403,
+        );
+      }
+      sku.imageUrl = p.imageUrl;
+      target = sku.id;
+      label = "更新商品图片";
+      detail = sku.code;
+      merchantId =
+        state.merchants.find((m) => m.userId === sku.submittedBy)?.id || null;
+      break;
+    }
+    case "updateMerchant": {
+      const p = merchantInput.extend({ id: required }).strict().parse(payload);
+      ensure(
+        access.role === "operations" || access.merchantId === p.id,
+        "不能修改其他商户资料",
+        403,
+      );
+      const m = state.merchants.find((m) => m.id === p.id);
+      ensure(m, "商户不存在", 404);
+      ensure(
+        !state.merchants.some(
+          (m) => m.id !== p.id && normalize(m.name) === normalize(p.name),
+        ),
+        "商户名称已存在",
+      );
+      Object.assign(m, {
+        name: p.name,
+        contact: p.contact,
+        location: p.location,
+        categories: p.categories,
+      });
+      // Revised business identity requires a fresh review, including suspended merchants.
+      m.status = "pending";
+      m.reviewNote = "经营资料已更新，等待重新审核";
+      target = m.id;
+      merchantId = m.id;
+      label = "修改商户资料";
+      detail = `${m.name} · 重新提交准入审核`;
+      break;
+    }
+    case "updateOfferTerms": {
+      approvedMerchant();
+      const p = z
+        .object({
+          id: required,
+          expectedVersion: count,
+          unitPrice: offerInput.shape.unitPrice.optional(),
+          availableQuantity: offerInput.shape.availableQuantity.optional(),
+          leadDays: offerInput.shape.leadDays.optional(),
+          validUntil: date.optional(),
+          conditionsConfirmed: z.boolean().optional(),
+          confirmationNote: z.string().trim().max(1000).optional(),
+        })
+        .strict()
+        .parse(payload);
+      const o = state.offers.find((o) => o.id === p.id);
+      ensure(o, "供货报价不存在", 404);
+      ensure(
+        access.role === "operations" || o.merchantId === access.merchantId,
+        "不能维护其他商户的供货报价",
+        403,
+      );
+      ensure(
+        o.version === p.expectedVersion,
+        "供货报价已更新，请刷新后再编辑",
+        409,
+      );
+      ensure(
+        o.status === "active",
+        "未生效或已暂停的供货，请编辑完整资料后提交审核",
+      );
+      ensure(
+        state.merchants.find((m) => m.id === o.merchantId)?.status === "active",
+        "供货商户尚未准入",
+      );
+      ensure(
+        state.skus.find((s) => s.id === o.skuId)?.status === "active",
+        "SKU 未生效",
+      );
+      const fields = [
+        "unitPrice",
+        "availableQuantity",
+        "leadDays",
+        "validUntil",
+      ] as const;
+      ensure(
+        fields.some((f) => p[f] !== undefined),
+        "请选择要更新的供货条件",
+      );
+      if (p.validUntil !== undefined) {
+        ensure(
+          p.conditionsConfirmed === true,
+          "请确认价格、数量和交货条件仍然有效",
+        );
+        ensure(
+          p.validUntil >= today(now) && p.validUntil > o.validUntil,
+          "续期日期必须晚于原有效期且不早于今天",
+        );
+      }
+      if (access.role === "operations")
+        ensure(p.confirmationNote, "请记录与商户核实的依据");
+      const changes: string[] = [];
+      for (const field of fields) {
+        const value = p[field];
+        if (value !== undefined && value !== o[field]) {
+          changes.push(`${field}：${o[field]} → ${value}`);
+          Object.assign(o, { [field]: value });
+        }
+      }
+      ensure(changes.length, "供货条件没有变化");
+      o.version++;
+      o.updatedAt = now.toISOString();
+      target = o.id;
+      merchantId = o.merchantId;
+      label = p.validUntil ? "确认供货条件并续期" : "快捷维护供货";
+      detail = `${changes.join("；")} · v${o.version}${p.confirmationNote ? ` · 核实依据：${p.confirmationNote}` : ""}`;
+      break;
+    }
     case "registerMerchant": {
       ops();
       const p = merchantInput.parse(payload);

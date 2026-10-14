@@ -16,6 +16,7 @@ import {
   Layers3,
   LoaderCircle,
   Menu,
+  Mountain,
   Package,
   Plus,
   RefreshCw,
@@ -26,6 +27,12 @@ import {
   X,
 } from "lucide-react";
 import { offerAvailability } from "../../lib/catalog/domain";
+import {
+  matchesSupplyFilter,
+  supplyHealth,
+  type SupplyFilter,
+} from "../../lib/catalog/maintenance";
+import { ImageField } from "./image-field";
 import type {
   CatalogResponse,
   Merchant,
@@ -42,9 +49,10 @@ import {
 } from "./primitives";
 
 type Dialog = {
-  type: "merchant" | "sku" | "offer" | "review";
+  type: "merchant" | "profile" | "sku" | "image" | "offer" | "review" | "quick";
   item?: Merchant | Sku | Offer;
   kind?: "Merchant" | "Sku" | "Offer";
+  field?: "unitPrice" | "availableQuantity" | "leadDays" | "validUntil";
 } | null;
 const pageNames: Record<string, string> = {
   overview: "供货工作台",
@@ -53,20 +61,32 @@ const pageNames: Record<string, string> = {
   offers: "供货报价",
   activity: "操作记录",
   detail: "SKU 供货详情",
+  profile: "我的商户",
 };
 const categories = ["家居日用", "家纺布艺", "箱包配饰", "其他"];
 
-export default function CatalogApp({ displayName }: { displayName: string }) {
+export default function CatalogApp({
+  displayName,
+  authenticated = true,
+  entry = "join",
+}: {
+  displayName: string;
+  authenticated?: boolean;
+  entry?: "join" | "create";
+}) {
   const [result, setResult] = useState<CatalogResponse>({ workspaces: [] });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [page, setPage] = useState("overview");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [mobile, setMobile] = useState(false);
-  const [entryMode, setEntryMode] = useState<"create" | "join">("create");
+  const [entryMode, setEntryMode] = useState<"create" | "join">(entry);
+  const [invitationCode, setInvitationCode] = useState("");
+  const [origin, setOrigin] = useState("");
   const [showEntry, setShowEntry] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [skuId, setSkuId] = useState("");
@@ -74,7 +94,9 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
   const data = workspace?.data;
   const ops = data?.access.role === "operations";
   const mine = data?.merchants.find((m) => m.id === data.access.merchantId);
-  const close = useCallback(() => setDialog(null), []);
+  const close = useCallback(() => {
+    if (!busy && !uploadBusy) setDialog(null);
+  }, [busy, uploadBusy]);
   const navigate = (next: string) => {
     setPage(next);
     setQuery("");
@@ -99,8 +121,31 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
     }
   }
   useEffect(() => {
-    void load();
-  }, []);
+    setOrigin(window.location.origin);
+    const incoming = new URLSearchParams(window.location.hash.slice(1)).get(
+      "invite",
+    );
+    let saved = "";
+    try {
+      if (incoming && /^[a-f0-9]{64}$/i.test(incoming))
+        sessionStorage.setItem("shanhai.join", incoming);
+      saved = sessionStorage.getItem("shanhai.join") || "";
+    } catch {
+      saved = incoming || "";
+    }
+    if (incoming)
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + window.location.search,
+      );
+    if (entry === "join" && saved) {
+      setInvitationCode(saved);
+      setShowEntry(true);
+    }
+    if (authenticated) void load();
+    else setLoading(false);
+  }, [authenticated, entry]);
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(""), 4500);
@@ -123,6 +168,14 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
         throw new Error(next.error || "保存失败");
       }
       setResult(next);
+      if ((body as { action?: string })?.action === "applyMerchant") {
+        try {
+          sessionStorage.removeItem("shanhai.join");
+        } catch {
+          /* In-memory form still works when storage is unavailable. */
+        }
+        setInvitationCode("");
+      }
       setDialog(null);
       setShowEntry(false);
       setToast("已保存");
@@ -141,6 +194,7 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
     });
   const open = (next: Dialog) => {
     setError("");
+    setUploadBusy(false);
     setDialog(next);
   };
   const matches = (...values: string[]) =>
@@ -148,6 +202,79 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
   const eligible =
     data?.offers.filter((o) => offerAvailability(data, o) === "可参与匹配") ||
     [];
+  const filterOffers = (filter: SupplyFilter) => {
+    navigate("offers");
+    setStatusFilter(filter);
+  };
+  const reminders = data
+    ? [
+        ...(ops
+          ? [
+              {
+                title: "商户待审核",
+                count: data.merchants.filter((m) => m.status === "pending")
+                  .length,
+                text: "核实经营资料，开放供货维护",
+                run: () => {
+                  navigate("merchants");
+                  setStatusFilter("pending");
+                },
+              },
+              {
+                title: "商品待审核",
+                count: data.skus.filter((s) => s.status === "pending").length,
+                text: "确认同款身份与标准规格",
+                run: () => {
+                  navigate("skus");
+                  setStatusFilter("pending");
+                },
+              },
+              {
+                title: "供货关联待审核",
+                count: data.offers.filter((o) => o.status === "pending").length,
+                text: "核实商品与商户供货条件",
+                run: () => filterOffers("pending"),
+              },
+            ]
+          : [
+              {
+                title: "需要处理的供货",
+                count: data.offers.filter((o) =>
+                  matchesSupplyFilter(data, o, "attention"),
+                ).length,
+                text: "查看审核意见与数量要求",
+                run: () => filterOffers("attention"),
+              },
+            ]),
+        {
+          title: "即将到期",
+          count: data.offers.filter((o) => supplyHealth(data, o).expiring)
+            .length,
+          text: "3天内到期，请确认供货条件后续期",
+          run: () => filterOffers("expiring"),
+        },
+        {
+          title: "报价已过期",
+          count: data.offers.filter((o) => supplyHealth(data, o).expired)
+            .length,
+          text: "更新有效期后才可恢复有效供给",
+          run: () => filterOffers("expired"),
+        },
+        ...(ops
+          ? [
+              {
+                title: "商品缺少图片",
+                count: data.skus.filter((s) => !s.imageUrl).length,
+                text: "补充清晰图片，便于核对商品",
+                run: () => {
+                  navigate("skus");
+                  setStatusFilter("missing-image");
+                },
+              },
+            ]
+          : []),
+      ]
+    : [];
   const stats = data
     ? [
         {
@@ -162,7 +289,9 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
             ? data.merchants.length
             : mine?.status === "active"
               ? "已准入"
-              : "待审核",
+              : mine?.status === "suspended"
+                ? "已暂停"
+                : "待审核",
           hint: ops
             ? `${data.merchants.filter((m) => m.status === "pending").length} 家待审核`
             : mine?.name || "",
@@ -175,16 +304,20 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
           icon: ClipboardList,
         },
         {
-          title: "关联多商户的 SKU",
-          number: data.skus.filter(
-            (s) =>
-              new Set(
-                data.offers
-                  .filter((o) => o.skuId === s.id)
-                  .map((o) => o.merchantId),
-              ).size > 1,
-          ).length,
-          hint: ops ? "同一商品，多方供货" : "当前仅显示自己的货源",
+          title: ops ? "关联多商户的 SKU" : "需要处理的供货",
+          number: ops
+            ? data.skus.filter(
+                (s) =>
+                  new Set(
+                    data.offers
+                      .filter((o) => o.skuId === s.id)
+                      .map((o) => o.merchantId),
+                  ).size > 1,
+              ).length
+            : data.offers.filter((o) =>
+                matchesSupplyFilter(data, o, "attention"),
+              ).length,
+          hint: ops ? "同一商品，多方供货" : "待审核、失效或即将到期",
           icon: Boxes,
         },
       ]
@@ -234,9 +367,65 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                   <Status value={o.status} />
                   <small>{offerAvailability(data!, o)}</small>
                   <small>有效至 {o.validUntil}</small>
+                  {supplyHealth(data!, o).expiring && (
+                    <small className="expiry-warning">
+                      {supplyHealth(data!, o).daysLeft === 0
+                        ? "今天到期"
+                        : `${supplyHealth(data!, o).daysLeft}天后到期`}
+                    </small>
+                  )}
                 </td>
                 <td data-label="操作">
                   <div className="row-actions">
+                    {o.status === "active" &&
+                      (ops || mine?.status === "active") && (
+                        <>
+                          <button
+                            onClick={() =>
+                              open({
+                                type: "quick",
+                                item: o,
+                                field: "unitPrice",
+                              })
+                            }
+                          >
+                            改价
+                          </button>
+                          <button
+                            onClick={() =>
+                              open({
+                                type: "quick",
+                                item: o,
+                                field: "availableQuantity",
+                              })
+                            }
+                          >
+                            改量
+                          </button>
+                          <button
+                            onClick={() =>
+                              open({
+                                type: "quick",
+                                item: o,
+                                field: "leadDays",
+                              })
+                            }
+                          >
+                            交期
+                          </button>
+                          <button
+                            onClick={() =>
+                              open({
+                                type: "quick",
+                                item: o,
+                                field: "validUntil",
+                              })
+                            }
+                          >
+                            续期
+                          </button>
+                        </>
+                      )}
                     <button onClick={() => open({ type: "offer", item: o })}>
                       编辑
                     </button>
@@ -281,16 +470,44 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
 
   function dialogForm(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (busy || uploadBusy) return;
     const form = new FormData(e.currentTarget);
     const s = (key: string) => String(form.get(key) || "").trim();
     const n = (key: string) => Number(s(key));
-    if (dialog?.type === "merchant")
-      return void command("registerMerchant", {
-        name: s("name"),
-        contact: s("contact"),
-        location: s("location"),
-        categories: s("categories"),
+    if (dialog?.type === "image")
+      return void command("updateSkuImage", {
+        id: dialog.item!.id,
+        imageUrl: s("imageUrl"),
       });
+    if (dialog?.type === "quick") {
+      const o = dialog.item as Offer;
+      const field = dialog.field!;
+      return void command("updateOfferTerms", {
+        id: o.id,
+        expectedVersion: o.version,
+        [field]:
+          field === "validUntil"
+            ? s(field)
+            : field === "unitPrice"
+              ? Math.round(n(field) * 100)
+              : n(field),
+        ...(field === "validUntil"
+          ? { conditionsConfirmed: form.get("conditionsConfirmed") === "on" }
+          : {}),
+        ...(ops ? { confirmationNote: s("confirmationNote") } : {}),
+      });
+    }
+    if (dialog?.type === "merchant" || dialog?.type === "profile")
+      return void command(
+        dialog.type === "profile" ? "updateMerchant" : "registerMerchant",
+        {
+          ...(dialog.type === "profile" ? { id: dialog.item!.id } : {}),
+          name: s("name"),
+          contact: s("contact"),
+          location: s("location"),
+          categories: s("categories"),
+        },
+      );
     if (dialog?.type === "sku") {
       const fields = [
         "code",
@@ -343,14 +560,17 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
     content = (
       <main className="entry">
         <div className="entry-intro">
-          <span className="eyebrow">LUOSI SUPPLY / M1</span>
+          <a href="/" className="entry-brand">
+            <Mountain size={25} />
+            山海供
+          </a>
           <h1>
             让每一份好货，
             <br />
             成为可靠的供给。
           </h1>
           <p>
-            商户维护商品和供货条件，平台建立统一商品库，为自动组货准备真实、有效的货源。
+            关联标准商品，维护自己的价格、数量和交期，让平台组织清楚、可靠的供货货盘。
           </p>
           <div className="entry-steps">
             <span>01 商户入驻</span>
@@ -362,107 +582,133 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
           </div>
         </div>
         <section className="entry-card">
-          <div className="tabs">
-            <button
-              className={entryMode === "create" ? "active" : ""}
-              onClick={() => setEntryMode("create")}
-            >
-              运营建立空间
-            </button>
-            <button
-              className={entryMode === "join" ? "active" : ""}
-              onClick={() => setEntryMode("join")}
-            >
-              商户申请入驻
-            </button>
-          </div>
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
-          <form
-            key={entryMode}
-            onSubmit={(e) => {
-              e.preventDefault();
-              const f = new FormData(e.currentTarget);
-              const v = (k: string) => String(f.get(k) || "");
-              if (entryMode === "create")
-                void submit({
-                  action: "createWorkspace",
-                  name: v("name"),
-                  priceBasis: v("priceBasis"),
-                });
-              else
-                void submit({
-                  action: "applyMerchant",
-                  invitationCode: v("invitationCode"),
-                  payload: {
-                    name: v("name"),
-                    contact: v("contact"),
-                    location: v("location"),
-                    categories: v("categories"),
-                  },
-                });
-            }}
-          >
-            {entryMode === "create" ? (
-              <>
-                <h2>建立你的运营空间</h2>
-                <p className="muted">
-                  从空白货盘开始，当前账号成为该空间运营负责人。
-                </p>
-                <Field label="空间名称">
-                  <input
-                    name="name"
-                    required
-                    maxLength={160}
-                    defaultValue="螺蛳湾海外供货"
-                  />
-                </Field>
-                <Field
-                  label="统一供货价格口径"
-                  hint="整个空间按相同口径维护商户价格，创建后由系统统一展示。"
+          {!authenticated ? (
+            <div className="sign-in-card">
+              <h2>欢迎加入山海供</h2>
+              <p className="muted">
+                登录后提交经营资料，通过审核即可维护供货商品。
+              </p>
+              {invitationCode && (
+                <p className="notice">已收到入驻邀请，登录后继续填写申请。</p>
+              )}
+              <a
+                className="btn primary"
+                href="/signin-with-chatgpt?return_to=%2Fmerchant"
+                target="_top"
+              >
+                使用 ChatGPT 账号登录 <ArrowRight size={16} />
+              </a>
+            </div>
+          ) : (
+            <>
+              <div className="tabs">
+                <button
+                  className={entryMode === "create" ? "active" : ""}
+                  onClick={() => setEntryMode("create")}
                 >
-                  <input
-                    name="priceBasis"
-                    required
-                    maxLength={160}
-                    defaultValue="人民币含税商品供货价，国内运费另计"
-                  />
-                </Field>
-              </>
-            ) : (
-              <>
-                <h2>加入运营空间</h2>
-                <p className="muted">
-                  使用运营提供的邀请码，提交经营资料。审核通过后可维护供货商品。
+                  运营建立空间
+                </button>
+                <button
+                  className={entryMode === "join" ? "active" : ""}
+                  onClick={() => setEntryMode("join")}
+                >
+                  商户申请入驻
+                </button>
+              </div>
+              {error && (
+                <p className="error" role="alert">
+                  {error}
                 </p>
-                <Field label="入驻邀请码">
-                  <input
-                    name="invitationCode"
-                    autoComplete="off"
-                    required
-                    minLength={64}
-                    maxLength={64}
-                  />
-                </Field>
-                <MerchantFields />
-              </>
-            )}
-            <button className="btn primary" disabled={busy || loading}>
-              {busy
-                ? "保存中…"
-                : entryMode === "create"
-                  ? "建立运营空间"
-                  : "提交入驻申请"}
-              <ArrowRight size={16} />
-            </button>
-          </form>
-          {workspace && (
-            <button className="text-button" onClick={() => setShowEntry(false)}>
-              返回现有空间
-            </button>
+              )}
+              <form
+                key={entryMode}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const f = new FormData(e.currentTarget);
+                  const v = (k: string) => String(f.get(k) || "");
+                  if (entryMode === "create")
+                    void submit({
+                      action: "createWorkspace",
+                      name: v("name"),
+                      priceBasis: v("priceBasis"),
+                    });
+                  else
+                    void submit({
+                      action: "applyMerchant",
+                      invitationCode: v("invitationCode"),
+                      payload: {
+                        name: v("name"),
+                        contact: v("contact"),
+                        location: v("location"),
+                        categories: v("categories"),
+                      },
+                    });
+                }}
+              >
+                {entryMode === "create" ? (
+                  <>
+                    <h2>建立你的运营空间</h2>
+                    <p className="muted">
+                      从空白货盘开始，当前账号成为该空间运营负责人。
+                    </p>
+                    <Field label="空间名称">
+                      <input
+                        name="name"
+                        required
+                        maxLength={160}
+                        defaultValue="山海供 · 螺蛳湾货盘"
+                      />
+                    </Field>
+                    <Field
+                      label="统一供货价格口径"
+                      hint="整个空间按相同口径维护商户价格，创建后由系统统一展示。"
+                    >
+                      <input
+                        name="priceBasis"
+                        required
+                        maxLength={160}
+                        defaultValue="人民币含税商品供货价，国内运费另计"
+                      />
+                    </Field>
+                  </>
+                ) : (
+                  <>
+                    <h2>加入运营空间</h2>
+                    <p className="muted">
+                      使用运营提供的邀请码，提交经营资料。审核通过后可维护供货商品。
+                    </p>
+                    <Field label="入驻邀请码">
+                      <input
+                        name="invitationCode"
+                        autoComplete="off"
+                        required
+                        minLength={64}
+                        maxLength={64}
+                        value={invitationCode}
+                        onChange={(e) => setInvitationCode(e.target.value)}
+                      />
+                    </Field>
+                    <MerchantFields />
+                  </>
+                )}
+                <button className="btn primary" disabled={busy || loading}>
+                  {busy
+                    ? "保存中…"
+                    : entryMode === "create"
+                      ? "建立运营空间"
+                      : "提交入驻申请"}
+                  <ArrowRight size={16} />
+                </button>
+              </form>
+              {workspace && (
+                <button
+                  className="text-button"
+                  onClick={() => setShowEntry(false)}
+                >
+                  返回现有空间
+                </button>
+              )}
+            </>
           )}
         </section>
       </main>
@@ -518,37 +764,22 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
         <section className="panel">
           <div className="panel-heading">
             <div>
-              <h2>当前开发里程碑</h2>
-              <p>M1 · 商户与标准货盘</p>
+              <h2>{ops ? "今天需要处理" : "我的供货提醒"}</h2>
+              <p>按当前商品与供货条件生成，点击即可处理</p>
             </div>
-            <span className="status active">进行小范围验证</span>
+            <span className="status active">供货维护</span>
           </div>
-          <div className="milestones">
-            <div>
-              <Check />
-              <b>商户入驻</b>
-              <small>经营资料与准入</small>
-            </div>
-            <div>
-              <Check />
-              <b>标准 SKU 库</b>
-              <small>统一商品身份</small>
-            </div>
-            <div>
-              <Check />
-              <b>商户供货维护</b>
-              <small>一款商品，多份报价</small>
-            </div>
-            <div className="later">
-              <span>04</span>
-              <b>自动匹配组货</b>
-              <small>下一里程碑</small>
-            </div>
-            <div className="later">
-              <span>05</span>
-              <b>对外报价</b>
-              <small>后续里程碑</small>
-            </div>
+          <div className="task-grid">
+            {reminders.map((task) => (
+              <button className="task-card" key={task.title} onClick={task.run}>
+                <span>
+                  {task.title}
+                  <ArrowRight size={16} />
+                </span>
+                <strong>{task.count}</strong>
+                <small>{task.text}</small>
+              </button>
+            ))}
           </div>
         </section>
         <section className="panel">
@@ -569,11 +800,15 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
         </section>
       </>
     );
-  } else if (page === "merchants") {
+  } else if (page === "merchants" || page === "profile") {
     content = (
       <div className="merchant-grid">
         {data.merchants
-          .filter((m) => matches(m.name, m.categories, m.location))
+          .filter(
+            (m) =>
+              matches(m.name, m.categories, m.location) &&
+              (statusFilter === "all" || m.status === statusFilter),
+          )
           .map((m) => (
             <article className="panel merchant-card" key={m.id}>
               <div className="card-top">
@@ -597,6 +832,12 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                 </dd>
               </dl>
               {m.reviewNote && <p className="note">{m.reviewNote}</p>}
+              <button
+                className="btn"
+                onClick={() => open({ type: "profile", item: m })}
+              >
+                修改经营资料
+              </button>
               {ops && (
                 <button
                   className="btn"
@@ -615,6 +856,24 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
             text="可以由运营协助登记，也可以给商户邀请码，由商户登录后申请入驻。"
           />
         )}
+        {!ops && (
+          <section className="panel profile-help">
+            <h2>我的供货服务</h2>
+            <p>
+              商品审核、入驻和供货条件问题，请联系向你发送入驻邀请的平台运营。
+            </p>
+            <button className="btn" onClick={() => navigate("activity")}>
+              查看我的操作记录
+            </button>
+            <a
+              className="text-button"
+              href="/signout-with-chatgpt?return_to=%2Fmerchant"
+              target="_top"
+            >
+              退出登录
+            </a>
+          </section>
+        )}
       </div>
     );
   } else if (page === "skus") {
@@ -632,6 +891,7 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
               <option value="active">已生效</option>
               <option value="pending">待审核</option>
               <option value="rejected">需修改</option>
+              <option value="missing-image">缺少图片</option>
             </select>
           </label>
         </div>
@@ -640,7 +900,9 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
             .filter(
               (s) =>
                 matches(s.name, s.code, s.specification) &&
-                (statusFilter === "all" || s.status === statusFilter),
+                (statusFilter === "all" ||
+                  s.status === statusFilter ||
+                  (statusFilter === "missing-image" && !s.imageUrl)),
             )
             .map((s) => (
               <article className="panel sku-card" key={s.id}>
@@ -685,6 +947,14 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                           修改
                         </button>
                       )}
+                    {ops && (
+                      <button
+                        className="text-button"
+                        onClick={() => open({ type: "image", item: s })}
+                      >
+                        {s.imageUrl ? "修改图片" : "补充图片"}
+                      </button>
+                    )}
                     {ops && s.status !== "active" && (
                       <button
                         className="text-button"
@@ -774,15 +1044,46 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
             {data.priceBasis}。商户供货价为内部采购成本，后续客户报价单独管理。
           </span>
         </div>
+        <div className="supply-filters" aria-label="供货状态筛选">
+          {(
+            [
+              ["all", "全部"],
+              ["available", "有效供货"],
+              ["pending", "待审核"],
+              ["expiring", "即将到期"],
+              ["expired", "已过期"],
+              ["paused", "已下架"],
+              ["attention", "需处理"],
+            ] as [SupplyFilter, string][]
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              className={statusFilter === key ? "active" : ""}
+              aria-pressed={statusFilter === key}
+              onClick={() => setStatusFilter(key)}
+            >
+              {label}
+              <span>
+                {
+                  data.offers.filter((o) => matchesSupplyFilter(data, o, key))
+                    .length
+                }
+              </span>
+            </button>
+          ))}
+        </div>
         <section className="panel">
           {offersTable(
             data.offers.filter((o) => {
               const sku = data.skus.find((s) => s.id === o.skuId);
-              return matches(
-                sku?.name || "",
-                sku?.code || "",
-                o.merchantCode,
-                data.merchants.find((m) => m.id === o.merchantId)?.name || "",
+              return (
+                matchesSupplyFilter(data, o, statusFilter as SupplyFilter) &&
+                matches(
+                  sku?.name || "",
+                  sku?.code || "",
+                  o.merchantCode,
+                  data.merchants.find((m) => m.id === o.merchantId)?.name || "",
+                )
               );
             }),
           )}
@@ -825,7 +1126,9 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
   const skuEdit =
     dialog?.type === "sku" ? (dialog.item as Sku | undefined) : undefined;
   const offer =
-    dialog?.type === "offer" ? (dialog.item as Offer | undefined) : undefined;
+    dialog?.type === "offer" || dialog?.type === "quick"
+      ? (dialog.item as Offer | undefined)
+      : undefined;
   return (
     <div className="app-shell">
       {data && !showEntry && (
@@ -833,11 +1136,11 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
           <aside className={`sidebar ${mobile ? "open" : ""}`}>
             <div className="brand">
               <span>
-                <Boxes size={25} />
+                <Mountain size={25} />
               </span>
               <div>
-                <b>螺蛳湾 · 海外供货</b>
-                <small>LUOSI SUPPLY</small>
+                <b>山海供</b>
+                <small>SHANHAI SUPPLY</small>
               </div>
             </div>
             <div className="workspace-name">
@@ -846,21 +1149,28 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
             </div>
             <p className="nav-caption">供货基础管理</p>
             <nav>
-              {[
-                { id: "overview", name: "供货工作台", icon: Layers3 },
-                {
-                  id: "merchants",
-                  name: ops ? "商户入驻" : "我的商户",
-                  icon: Users,
-                },
-                { id: "skus", name: "标准 SKU 库", icon: Package },
-                {
-                  id: "offers",
-                  name: ops ? "商户供货报价" : "我的供货报价",
-                  icon: ClipboardList,
-                },
-                { id: "activity", name: "操作记录", icon: ShieldCheck },
-              ].map((n) => (
+              {(ops
+                ? [
+                    { id: "overview", name: "供货工作台", icon: Layers3 },
+                    {
+                      id: "merchants",
+                      name: ops ? "商户入驻" : "我的商户",
+                      icon: Users,
+                    },
+                    { id: "skus", name: "标准 SKU 库", icon: Package },
+                    {
+                      id: "offers",
+                      name: ops ? "商户供货报价" : "我的供货报价",
+                      icon: ClipboardList,
+                    },
+                    { id: "activity", name: "操作记录", icon: ShieldCheck },
+                  ]
+                : [
+                    { id: "overview", name: "首页", icon: Layers3 },
+                    { id: "offers", name: "我的供货", icon: ClipboardList },
+                    { id: "profile", name: "我的", icon: Store },
+                  ]
+              ).map((n) => (
                 <button
                   key={n.id}
                   className={
@@ -882,7 +1192,7 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                 <br />
                 与付费社群权益独立
               </p>
-              <small>M1 · 标准货盘基础版</small>
+              <a href="/">返回山海供首页</a>
             </div>
           </aside>
           {mobile && (
@@ -905,7 +1215,7 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
               <Menu size={21} />
             </button>
             <span>
-              {data && !showEntry ? pageNames[page] : "螺蛳湾海外供货"}
+              {data && !showEntry ? pageNames[page] : "山海供 · 商户与运营入口"}
             </span>
           </div>
           <div className="topbar-right">
@@ -929,9 +1239,15 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
               </label>
             )}
             <span className="account">
-              <i>{displayName.slice(0, 1)}</i>
+              <i>{displayName.slice(0, 1) || "山"}</i>
               <span>
-                {data ? (ops ? "平台运营" : "供货商户") : "已登录"}
+                {data
+                  ? ops
+                    ? "平台运营"
+                    : "供货商户"
+                  : authenticated
+                    ? "已登录"
+                    : "欢迎入驻"}
                 <small>{displayName}</small>
               </span>
             </span>
@@ -941,7 +1257,7 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
           <main className="main-content">
             <div className="page-heading">
               <div>
-                <small>CATALOG FOUNDATION / M1</small>
+                <small>山海供 · {ops ? "运营后台" : "商户供货端"}</small>
                 <h1>{pageNames[page]}</h1>
                 <p>
                   {ops
@@ -992,11 +1308,12 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                     disabled={!ops && mine?.status !== "active"}
                     onClick={() => {
                       setSkuId("");
-                      open({ type: "offer" });
+                      if (ops) open({ type: "offer" });
+                      else navigate("skus");
                     }}
                   >
                     <Plus size={16} />
-                    新增供货报价
+                    {ops ? "新增供货报价" : "查找商品并供货"}
                   </button>
                 )}
               </div>
@@ -1013,35 +1330,36 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
             )}
             {result.invitationCode && (
               <section className="invitation panel">
-                <b>商户入驻邀请码</b>
+                <b>商户入驻链接</b>
                 <p>
                   有效至{" "}
                   {new Date(result.invitationExpiresAt!).toLocaleString(
                     "zh-CN",
+                    { timeZone: "Asia/Shanghai" },
                   )}
-                  ，新代码生效后旧代码失效。商户获得代码只能提交申请，仍需运营审核。
+                  ，将链接发给商户，登录后即可填写申请。更新邀请后旧链接失效，已入驻商户不受影响。
                 </p>
                 <div>
                   <input
-                    aria-label="入驻邀请码"
+                    aria-label="商户入驻链接"
                     readOnly
-                    value={result.invitationCode}
+                    value={`${origin}/merchant#invite=${result.invitationCode}`}
                   />
                   <button
                     className="btn"
                     onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(
-                          result.invitationCode!,
+                          `${window.location.origin}/merchant#invite=${result.invitationCode!}`,
                         );
-                        setToast("邀请码已复制");
+                        setToast("入驻链接已复制");
                       } catch {
-                        setToast("请选中邀请码手动复制");
+                        setToast("请选中入驻链接手动复制");
                       }
                     }}
                   >
                     <Copy size={15} />
-                    复制
+                    复制入驻链接
                   </button>
                 </div>
                 <button
@@ -1050,7 +1368,7 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                     setResult({ ...result, invitationCode: undefined })
                   }
                 >
-                  收起邀请码
+                  收起邀请
                 </button>
               </section>
             )}
@@ -1080,11 +1398,16 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
               </>
             )}
             <footer>
-              <span>螺蛳湾 · 海外供货平台</span>
-              <button onClick={() => setShowEntry(true)}>
+              <span>山海供 · 海外供货平台</span>
+              <button
+                onClick={() => {
+                  setEntryMode("join");
+                  setShowEntry(true);
+                }}
+              >
                 申请加入其他空间
               </button>
-              <span>自动匹配与对外报价将在后续里程碑开放</span>
+              <span>商户免费入驻 · 供货资料独立维护</span>
             </footer>
           </main>
         ) : (
@@ -1102,15 +1425,26 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
       {dialog && (
         <Modal
           title={
-            dialog.type === "merchant"
-              ? "登记供货商户"
-              : dialog.type === "sku"
-                ? "提交标准 SKU"
-                : dialog.type === "offer"
-                  ? offer
-                    ? "编辑供货报价"
-                    : "新增供货报价"
-                  : "审核与状态管理"
+            dialog.type === "quick"
+              ? {
+                  unitPrice: "修改供货价",
+                  availableQuantity: "修改可供数量",
+                  leadDays: "修改交货天数",
+                  validUntil: "确认条件并续期",
+                }[dialog.field!]
+              : dialog.type === "image"
+                ? "维护商品图片"
+                : dialog.type === "profile"
+                  ? "修改经营资料"
+                  : dialog.type === "merchant"
+                    ? "登记供货商户"
+                    : dialog.type === "sku"
+                      ? "提交标准 SKU"
+                      : dialog.type === "offer"
+                        ? offer
+                          ? "编辑供货报价"
+                          : "新增供货报价"
+                        : "审核与状态管理"
           }
           close={close}
         >
@@ -1121,13 +1455,137 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                   {error}
                 </div>
               )}
-              {dialog.type === "merchant" && (
+              {dialog.type === "image" && (
+                <ImageField
+                  workspaceId={workspace!.id}
+                  initialUrl={(dialog.item as Sku).imageUrl}
+                  onBusy={setUploadBusy}
+                />
+              )}
+              {dialog.type === "quick" && offer && (
                 <>
                   <p className="notice">
-                    运营协助登记的商户暂未绑定登录账号，由运营维护供货资料。
+                    {data?.skus.find((s) => s.id === offer.skuId)?.name} ·{" "}
+                    {offer.merchantCode}
+                    <br />
+                    {data?.priceBasis}
+                  </p>
+                  {dialog.field === "validUntil" ? (
+                    <>
+                      <dl className="renew-summary">
+                        <dt>当前供货价</dt>
+                        <dd>{currency(offer.unitPrice)}</dd>
+                        <dt>可供数量</dt>
+                        <dd>{offer.availableQuantity}</dd>
+                        <dt>起订 / 数量倍数</dt>
+                        <dd>
+                          {offer.minimumQuantity} / {offer.quantityStep}
+                        </dd>
+                        <dt>交货条件</dt>
+                        <dd>
+                          {offer.leadDays}天内 · {offer.deliveryLocation}
+                        </dd>
+                        <dt>原有效期</dt>
+                        <dd>{offer.validUntil}</dd>
+                      </dl>
+                      <Field label="新的有效期">
+                        <input
+                          name="validUntil"
+                          type="date"
+                          min={[
+                            dateAfter(0),
+                            new Date(Date.parse(offer.validUntil) + 86400000)
+                              .toISOString()
+                              .slice(0, 10),
+                          ]
+                            .sort()
+                            .at(-1)}
+                          defaultValue={[
+                            dateAfter(7),
+                            new Date(
+                              Date.parse(offer.validUntil) + 7 * 86400000,
+                            )
+                              .toISOString()
+                              .slice(0, 10),
+                          ]
+                            .sort()
+                            .at(-1)}
+                          required
+                        />
+                      </Field>
+                      <label className="checkbox-row">
+                        <input
+                          name="conditionsConfirmed"
+                          type="checkbox"
+                          required
+                        />
+                        我已核实上述价格、数量和交货条件，在新的有效期内仍然有效。
+                      </label>
+                    </>
+                  ) : (
+                    <Field
+                      label={
+                        dialog.field === "unitPrice"
+                          ? "新的供货单价（元）"
+                          : dialog.field === "availableQuantity"
+                            ? "新的可供数量"
+                            : "新的交货天数"
+                      }
+                      hint={
+                        dialog.field === "availableQuantity"
+                          ? "填写本次最新可供数量，不是增加的数量。"
+                          : undefined
+                      }
+                    >
+                      <input
+                        name={dialog.field}
+                        type="number"
+                        min={dialog.field === "unitPrice" ? "0.01" : "0"}
+                        max={dialog.field === "leadDays" ? "365" : "1000000"}
+                        step={dialog.field === "unitPrice" ? "0.01" : "1"}
+                        required
+                        defaultValue={
+                          dialog.field === "unitPrice"
+                            ? offer.unitPrice / 100
+                            : offer[dialog.field!]
+                        }
+                      />
+                    </Field>
+                  )}
+                  {ops && (
+                    <Field label="与商户核实的依据">
+                      <textarea
+                        name="confirmationNote"
+                        rows={3}
+                        required
+                        maxLength={1000}
+                        placeholder="例如：今日电话确认可供200件，联系人张先生"
+                      />
+                    </Field>
+                  )}
+                  {supplyHealth(data!, offer).expired &&
+                    dialog.field !== "validUntil" && (
+                      <p className="note">
+                        该报价已过期。本次修改不会自动续期，请核实全部条件后另行续期。
+                      </p>
+                    )}
+                </>
+              )}
+              {(dialog.type === "merchant" || dialog.type === "profile") && (
+                <>
+                  <p className="notice">
+                    {dialog.type === "profile"
+                      ? "修改经营资料后需要重新审核，审核通过前暂不作为有效供货商。"
+                      : "运营协助登记的商户暂未绑定登录账号，由运营维护供货资料。"}
                   </p>
                   <div className="form-grid">
-                    <MerchantFields />
+                    <MerchantFields
+                      merchant={
+                        dialog.type === "profile"
+                          ? (dialog.item as Merchant)
+                          : undefined
+                      }
+                    />
                   </div>
                 </>
               )}
@@ -1220,19 +1678,11 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
                         placeholder="例如单件独立包装，20件/箱"
                       />
                     </Field>
-                    <Field
-                      label="商品图片链接"
-                      wide
-                      hint="本阶段可填写 HTTPS 图片地址，文件上传排在后续迭代。"
-                    >
-                      <input
-                        type="url"
-                        name="imageUrl"
-                        defaultValue={skuEdit?.imageUrl}
-                        placeholder="https://…"
-                        maxLength={2000}
-                      />
-                    </Field>
+                    <ImageField
+                      workspaceId={workspace!.id}
+                      initialUrl={skuEdit?.imageUrl}
+                      onBusy={setUploadBusy}
+                    />
                   </div>
                 </>
               )}
@@ -1394,11 +1844,20 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
               )}
             </div>
             <div className="modal-footer">
-              <button type="button" className="btn" onClick={close}>
+              <button
+                type="button"
+                className="btn"
+                onClick={close}
+                disabled={busy || uploadBusy}
+              >
                 取消
               </button>
-              <button className="btn primary" type="submit" disabled={busy}>
-                {busy ? "保存中…" : "确认并保存"}
+              <button
+                className="btn primary"
+                type="submit"
+                disabled={busy || uploadBusy}
+              >
+                {busy ? "保存中…" : uploadBusy ? "正在上传图片…" : "确认并保存"}
               </button>
             </div>
           </form>
@@ -1421,21 +1880,37 @@ export default function CatalogApp({ displayName }: { displayName: string }) {
   );
 }
 
-function MerchantFields() {
+function MerchantFields({ merchant }: { merchant?: Merchant }) {
   return (
     <>
       <Field label="商户名称">
-        <input name="name" required maxLength={200} />
+        <input
+          name="name"
+          defaultValue={merchant?.name}
+          required
+          maxLength={200}
+        />
       </Field>
       <Field label="联系人及联系方式">
-        <input name="contact" required maxLength={200} />
+        <input
+          name="contact"
+          defaultValue={merchant?.contact}
+          required
+          maxLength={200}
+        />
       </Field>
       <Field label="档口 / 经营地址">
-        <input name="location" required maxLength={200} />
+        <input
+          name="location"
+          defaultValue={merchant?.location}
+          required
+          maxLength={200}
+        />
       </Field>
       <Field label="主营品类">
         <input
           name="categories"
+          defaultValue={merchant?.categories}
           required
           maxLength={200}
           placeholder="例如家居日用、家纺"

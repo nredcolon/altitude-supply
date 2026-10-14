@@ -28,7 +28,7 @@ if (!data.workspace) {
   assert.equal(response.status, 201);
   data = await response.json();
 }
-const w = data.workspace;
+let w = data.workspace;
 const payload = {
   name: `示例接口商户-${Date.now()}`,
   contact: "本地测试",
@@ -73,4 +73,107 @@ assert.equal(
 assert.equal((await fetch(base + "/api/workspace", { headers })).status, 404);
 console.log(
   "PASS: local sign-in, real D1 persistence, revision conflicts, forged role rejection, cross-origin rejection and retired prototype route.",
+);
+
+// Use new, explicitly labeled validation records; never edit an existing merchant's goods.
+w = persisted.workspace;
+const apply = async (action, payload) => {
+  const result = await post({
+    workspaceId: w.id,
+    revision: w.revision,
+    action,
+    payload,
+  });
+  const body = await result.json();
+  assert.equal(result.status, 200, body.error || action);
+  w = body.workspace;
+  return w;
+};
+const merchant = w.data.merchants.find((m) => m.name === payload.name);
+await apply("reviewMerchant", {
+  id: merchant.id,
+  status: "active",
+  note: "本地维护流程验证，非真实供货商户",
+});
+const png = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGaIAAAAASUVORK5CYII=",
+  "base64",
+);
+response = await fetch(`${base}/api/catalog/images?workspaceId=${w.id}`, {
+  method: "POST",
+  headers: { cookie, "Content-Type": "image/png" },
+  body: png,
+});
+assert.equal(response.status, 201, await response.clone().text());
+const { imageUrl } = await response.json();
+assert.equal((await fetch(base + imageUrl)).status, 401);
+const imageResponse = await fetch(base + imageUrl, { headers: { cookie } });
+assert.equal(imageResponse.status, 200);
+assert.equal(imageResponse.headers.get("Content-Type"), "image/png");
+assert.deepEqual(Buffer.from(await imageResponse.arrayBuffer()), png);
+const skuCode = `API-${Date.now()}`;
+await apply("submitSku", {
+  code: skuCode,
+  name: "示例维护验证商品",
+  category: "家居日用",
+  origin: "本地测试",
+  model: skuCode,
+  material: "测试材料",
+  specification: "测试规格",
+  quality: "本地验证",
+  unit: "件",
+  packaging: "10件/箱",
+  imageUrl,
+});
+const sku = w.data.skus.find((s) => s.code === skuCode);
+await apply("reviewSku", {
+  id: sku.id,
+  status: "active",
+  note: "本地验证图片与商品，非正式货盘",
+});
+const day = (offset) =>
+  new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(
+    new Date(Date.now() + offset * 86400000),
+  );
+await apply("saveOffer", {
+  skuId: sku.id,
+  merchantId: merchant.id,
+  merchantCode: skuCode,
+  unitPrice: 920,
+  availableQuantity: 50,
+  minimumQuantity: 10,
+  quantityStep: 10,
+  leadDays: 3,
+  deliveryLocation: "本地验证交货点",
+  validUntil: day(1),
+});
+let offer = w.data.offers.find((o) => o.skuId === sku.id);
+await apply("reviewOffer", {
+  id: offer.id,
+  expectedVersion: offer.version,
+  status: "active",
+  note: "本地维护验证",
+});
+offer = w.data.offers.find((o) => o.id === offer.id);
+await apply("updateOfferTerms", {
+  id: offer.id,
+  expectedVersion: offer.version,
+  availableQuantity: 20,
+  confirmationNote: "本地改量验证，无实际采购",
+});
+offer = w.data.offers.find((o) => o.id === offer.id);
+assert.equal(offer.availableQuantity, 20);
+assert.equal(offer.validUntil, day(1));
+await apply("updateOfferTerms", {
+  id: offer.id,
+  expectedVersion: offer.version,
+  validUntil: day(14),
+  conditionsConfirmed: true,
+  confirmationNote: "本地续期验证，已核实测试条件",
+});
+offer = w.data.offers.find((o) => o.id === offer.id);
+assert.equal(offer.validUntil, day(14));
+await apply("pauseOffer", { id: offer.id, expectedVersion: offer.version });
+console.log(
+  "PASS: real local R2 upload and protected read, SKU association, quick quantity update, explicit renewal and pause. Validation offer left paused.",
 );

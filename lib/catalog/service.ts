@@ -9,6 +9,7 @@ import {
   viewCatalog,
 } from "./domain.ts";
 import type { CatalogResponse, CatalogState, WorkspaceSummary } from "./types";
+import { catalogImages } from "./images.ts";
 
 interface Row {
   id: string;
@@ -49,7 +50,7 @@ async function hash(value: string) {
 const invitationExpiry = (now: Date) =>
   new Date(now.getTime() + 7 * 86400000).toISOString();
 
-export function catalogService(db: D1Database) {
+export function catalogService(db: D1Database, bucket?: R2Bucket) {
   async function list(userId: string): Promise<WorkspaceSummary[]> {
     const result = await db
       .prepare(
@@ -205,6 +206,31 @@ export function catalogService(db: D1Database) {
         const state: CatalogState = JSON.parse(row.data);
         const access = accessFor(state, userId);
         ensure(row.revision === p.revision, "数据已更新，请刷新后重试", 409);
+        if (
+          ["submitSku", "updateSku", "updateSkuImage"].includes(p.action) &&
+          p.payload &&
+          typeof p.payload === "object" &&
+          "imageUrl" in p.payload
+        ) {
+          const imageUrl = p.payload.imageUrl;
+          if (
+            typeof imageUrl === "string" &&
+            imageUrl.startsWith("/api/catalog/images/")
+          ) {
+            const parsed = new URL(imageUrl, request.url);
+            ensure(
+              parsed.searchParams.get("workspaceId") === row.id,
+              "图片必须属于当前运营空间",
+            );
+            const read = await catalogImages(db, bucket).handle(
+              new Request(parsed),
+              userId,
+              parsed.pathname.split("/").at(-1),
+            );
+            await read.body?.cancel();
+            ensure(read.ok, "图片不可用或无权使用，请重新上传", 403);
+          }
+        }
         if (p.action === "rotateInvitation") {
           ensure(access.role === "operations", "只有运营可以更新邀请码", 403);
           const invitationCode = token();

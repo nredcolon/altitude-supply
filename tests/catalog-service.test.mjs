@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { catalogService } from "../lib/catalog/service.ts";
+import { catalogImages } from "../lib/catalog/images.ts";
 
 // Execute the real repository SQL with SQLite, matching the D1 statement contract.
-function setup() {
+function setup(bucket) {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(
     readFileSync(
@@ -35,7 +36,7 @@ function setup() {
       return wrapper;
     },
   };
-  const service = catalogService(db);
+  const service = catalogService(db, bucket);
   const now = new Date("2026-10-13T08:00:00Z");
   const call = async (user, input, query = "", headers = {}) => {
     const request = new Request(
@@ -51,7 +52,7 @@ function setup() {
     const result = await service.handle(request, user, now);
     return { status: result.status, body: await result.json() };
   };
-  return { call, sqlite };
+  return { call, sqlite, db };
 }
 const create = {
   action: "createWorkspace",
@@ -227,5 +228,117 @@ test("更新邀请码使旧代码失效，已入驻成员不受影响", async ()
     400,
   );
   assert.equal((await call("a")).body.workspaces.length, 1);
+  sqlite.close();
+});
+
+test("上传图片使用持久化存储，隔离草稿与不同空间，公开 SKU 不暴露其他草稿图", async () => {
+  const objects = new Map();
+  const bucket = {
+    async put(key, bytes, options) {
+      objects.set(key, { bytes: new Uint8Array(bytes), ...options });
+    },
+    async get(key) {
+      const o = objects.get(key);
+      return o ? { ...o, body: new Response(o.bytes).body } : null;
+    },
+  };
+  const { call, sqlite, db } = setup(bucket);
+  const created = await call("owner", create);
+  const w = created.body.workspace;
+  const images = catalogImages(db, bucket);
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGaIAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const upload = (user, body = png, extra = {}) =>
+    images.handle(
+      new Request(`http://localhost/api/catalog/images?workspaceId=${w.id}`, {
+        method: "POST",
+        body,
+        headers: extra,
+      }),
+      user,
+    );
+  assert.equal((await upload(null)).status, 401);
+  assert.equal((await upload("outsider")).status, 403);
+  assert.equal(
+    (await upload("owner", png, { Origin: "https://evil.example" })).status,
+    403,
+  );
+  assert.equal(
+    (await upload("owner", Buffer.from("<svg>this is not a photo</svg>")))
+      .status,
+    400,
+  );
+  assert.equal(
+    (await upload("owner", new Uint8Array(5 * 1024 * 1024 + 1))).status,
+    413,
+  );
+  const uploaded = await upload("owner");
+  assert.equal(uploaded.status, 201);
+  const { imageUrl } = await uploaded.json();
+  const imageId = new URL(imageUrl, "http://localhost").pathname
+    .split("/")
+    .at(-1);
+  const read = (user) =>
+    images.handle(new Request(`http://localhost${imageUrl}`), user, imageId);
+  assert.equal((await read("owner")).headers.get("Content-Type"), "image/png");
+  await call("merchant", {
+    action: "applyMerchant",
+    invitationCode: created.body.invitationCode,
+    payload: application,
+  });
+  assert.equal((await upload("merchant")).status, 403);
+  assert.equal((await read("merchant")).status, 403);
+  let current = (await call("owner")).body.workspace;
+  await call(
+    "owner",
+    cmd(current, "reviewMerchant", {
+      id: current.data.merchants[0].id,
+      status: "active",
+      note: "已核实",
+    }),
+  );
+  const product = {
+    code: "PHOTO-001",
+    name: "测试图片商品",
+    category: "日用",
+    origin: "测试工厂",
+    model: "P1",
+    material: "PP",
+    specification: "白色",
+    quality: "样品一致",
+    unit: "件",
+    packaging: "袋装",
+    imageUrl,
+  };
+  let merchantWorkspace = (await call("merchant")).body.workspace;
+  assert.equal(
+    (await call("merchant", cmd(merchantWorkspace, "submitSku", product)))
+      .status,
+    403,
+    "cannot associate another user's private upload to gain access",
+  );
+  current = (await call("owner")).body.workspace;
+  const submitted = await call("owner", cmd(current, "submitSku", product));
+  assert.equal(submitted.status, 200);
+  assert.equal((await read("merchant")).status, 403);
+  const published = await call(
+    "owner",
+    cmd(submitted.body.workspace, "reviewSku", {
+      id: submitted.body.workspace.data.skus[0].id,
+      status: "active",
+      note: "已核实图片",
+    }),
+  );
+  assert.equal(published.status, 200);
+  assert.equal((await read("merchant")).status, 200);
+  const other = await call("other-owner", create);
+  assert.equal(
+    (await call("other-owner", cmd(other.body.workspace, "submitSku", product)))
+      .status,
+    400,
+  );
+  assert.equal((await upload("merchant")).status, 201);
   sqlite.close();
 });

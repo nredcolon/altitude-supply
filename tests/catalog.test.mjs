@@ -7,6 +7,10 @@ import {
   offerAvailability,
   viewCatalog,
 } from "../lib/catalog/domain.ts";
+import {
+  supplyHealth,
+  matchesSupplyFilter,
+} from "../lib/catalog/maintenance.ts";
 
 const now = new Date("2026-10-13T08:00:00Z");
 const merchant = {
@@ -299,4 +303,177 @@ test("被驳回的 SKU 可由原提交人修改，已生效商品身份不可重
     () => act(s, "updateSku", { ...sku, id: s.skus[0].id }),
     /已生效商品身份/,
   );
+});
+
+function activeOffer() {
+  let s = fixture();
+  s = act(s, "saveOffer", offerFor(s));
+  return act(s, "reviewOffer", {
+    id: s.offers[0].id,
+    expectedVersion: 1,
+    status: "active",
+    note: "已核实",
+  });
+}
+
+test("快捷改价改量保留商品约束，校验账号与版本，运营代录留下核实依据", () => {
+  const s = activeOffer();
+  const o = s.offers[0];
+  const payload = {
+    id: o.id,
+    expectedVersion: o.version,
+    availableQuantity: 260,
+  };
+  const changed = act(s, "updateOfferTerms", payload, "merchantA");
+  assert.equal(changed.offers[0].availableQuantity, 260);
+  assert.equal(changed.offers[0].minimumQuantity, o.minimumQuantity);
+  assert.equal(changed.offers[0].validUntil, o.validUntil);
+  assert.equal(changed.offers[0].version, o.version + 1);
+  assert.throws(
+    () => act(changed, "updateOfferTerms", payload, "merchantA"),
+    /已更新/,
+  );
+  assert.throws(
+    () => act(s, "updateOfferTerms", payload, "merchantB"),
+    /其他商户/,
+  );
+  assert.throws(() => act(s, "updateOfferTerms", payload), /核实/);
+  assert.throws(() =>
+    act(
+      s,
+      "updateOfferTerms",
+      { ...payload, merchantId: s.merchants[1].id },
+      "merchantA",
+    ),
+  );
+  const assisted = act(s, "updateOfferTerms", {
+    ...payload,
+    confirmationNote: "电话与店主核实",
+  });
+  assert.match(assisted.events[0].detail, /电话与店主核实/);
+  assert.equal(s.offers[0].availableQuantity, 400);
+});
+
+test("续期必须确认条件且延长有效期；改价不能隐式续期或恢复已暂停关联", () => {
+  let s = activeOffer();
+  s.offers[0].validUntil = "2026-10-12";
+  const o = s.offers[0];
+  const renew = {
+    id: o.id,
+    expectedVersion: o.version,
+    validUntil: "2026-10-27",
+  };
+  assert.throws(() => act(s, "updateOfferTerms", renew, "merchantA"), /确认/);
+  const changed = act(
+    s,
+    "updateOfferTerms",
+    { id: o.id, expectedVersion: o.version, unitPrice: 980 },
+    "merchantA",
+  );
+  assert.equal(
+    offerAvailability(changed, changed.offers[0], now),
+    "报价已过期",
+  );
+  const renewed = act(
+    s,
+    "updateOfferTerms",
+    { ...renew, conditionsConfirmed: true },
+    "merchantA",
+  );
+  assert.equal(
+    offerAvailability(renewed, renewed.offers[0], now),
+    "可参与匹配",
+  );
+  assert.throws(
+    () =>
+      act(
+        renewed,
+        "updateOfferTerms",
+        {
+          ...renew,
+          expectedVersion: renewed.offers[0].version,
+          conditionsConfirmed: true,
+        },
+        "merchantA",
+      ),
+    /晚于/,
+  );
+  s = act(s, "pauseOffer", { id: o.id, expectedVersion: o.version });
+  assert.throws(
+    () =>
+      act(
+        s,
+        "updateOfferTerms",
+        {
+          ...renew,
+          expectedVersion: s.offers[0].version,
+          conditionsConfirmed: true,
+        },
+        "merchantA",
+      ),
+    /未生效或已暂停/,
+  );
+});
+
+test("到期提醒按北京时间自然日，低于整箱起订及暂停货源不会显示为可续期有效货源", () => {
+  const s = activeOffer();
+  const o = { ...s.offers[0], validUntil: "2026-10-14" };
+  const beforeMidnight = new Date("2026-10-14T15:59:59Z");
+  assert.equal(supplyHealth(s, o, beforeMidnight).daysLeft, 0);
+  assert.equal(matchesSupplyFilter(s, o, "expiring", beforeMidnight), true);
+  assert.equal(
+    matchesSupplyFilter(s, o, "expired", new Date("2026-10-14T16:00:00Z")),
+    true,
+  );
+  assert.equal(
+    matchesSupplyFilter(
+      s,
+      { ...o, availableQuantity: 0 },
+      "expiring",
+      beforeMidnight,
+    ),
+    false,
+  );
+  assert.equal(
+    matchesSupplyFilter(
+      s,
+      { ...o, status: "paused" },
+      "expired",
+      new Date("2026-10-15"),
+    ),
+    false,
+  );
+});
+
+test("商户资料修改重新审核，不能借编辑恢复准入或改他人档案", () => {
+  const s = activeOffer();
+  const m = s.merchants[0];
+  const payload = { ...merchant, id: m.id, contact: "新联系人" };
+  const changed = act(s, "updateMerchant", payload, "merchantA");
+  assert.equal(changed.merchants[0].status, "pending");
+  assert.equal(changed.merchants[0].userId, "merchantA");
+  assert.equal(
+    offerAvailability(changed, changed.offers[0], now),
+    "商户未准入或已暂停",
+  );
+  assert.throws(
+    () => act(s, "updateMerchant", payload, "merchantB"),
+    /其他商户/,
+  );
+});
+
+test("生效 SKU 只有运营可维护图片且不改商品身份", () => {
+  const s = activeOffer();
+  const payload = {
+    id: s.skus[0].id,
+    imageUrl: "https://example.com/product.png",
+  };
+  assert.throws(
+    () => act(s, "updateSkuImage", payload, "merchantA"),
+    /只有运营/,
+  );
+  const changed = act(s, "updateSkuImage", payload);
+  assert.equal(changed.skus[0].fingerprint, s.skus[0].fingerprint);
+  assert.equal(changed.skus[0].status, "active");
+  assert.equal(changed.skus[0].imageUrl, payload.imageUrl);
 });
