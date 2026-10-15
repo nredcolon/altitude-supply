@@ -1,5 +1,6 @@
 import { accessFor, CatalogError, ensure } from "./domain.ts";
 import type { CatalogState } from "./types";
+import { platformRow, type PlatformOptions } from "./platform.ts";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const reply = (error: string, status: number) =>
@@ -50,7 +51,11 @@ async function limitedBody(request: Request) {
   return bytes;
 }
 
-export function catalogImages(db: D1Database, bucket: R2Bucket | undefined) {
+export function catalogImages(
+  db: D1Database,
+  bucket: R2Bucket | undefined,
+  options: PlatformOptions = {},
+) {
   return {
     async handle(
       request: Request,
@@ -63,11 +68,8 @@ export function catalogImages(db: D1Database, bucket: R2Bucket | undefined) {
         const workspaceId =
           new URL(request.url).searchParams.get("workspaceId") || "";
         ensure(/^[a-f0-9-]{36}$/.test(workspaceId), "请选择运营空间");
-        const row = await db
-          .prepare("SELECT data FROM catalog_workspaces WHERE id = ?")
-          .bind(workspaceId)
-          .first<{ data: string }>();
-        ensure(row, "运营空间不存在", 404);
+        const row = await platformRow(db, options);
+        ensure(row.id === workspaceId, "不能访问其他平台图片", 403);
         const state: CatalogState = JSON.parse(row.data);
         const access = accessFor(state, userId);
         if (request.method === "POST" && !imageId) {

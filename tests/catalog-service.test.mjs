@@ -4,6 +4,12 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { catalogService } from "../lib/catalog/service.ts";
 import { catalogImages } from "../lib/catalog/images.ts";
+import { emptyCatalog, viewCatalog } from "../lib/catalog/domain.ts";
+import {
+  initialPlatformSql,
+  platformRow,
+  sessionFor,
+} from "../lib/catalog/platform.ts";
 
 // Execute the real repository SQL with SQLite, matching the D1 statement contract.
 function setup(bucket) {
@@ -36,7 +42,8 @@ function setup(bucket) {
       return wrapper;
     },
   };
-  const service = catalogService(db, bucket);
+  const options = {};
+  const service = catalogService(db, bucket, options);
   const now = new Date("2026-10-13T08:00:00Z");
   const call = async (user, input, query = "", headers = {}, at = now) => {
     const request = new Request(
@@ -52,7 +59,41 @@ function setup(bucket) {
     const result = await service.handle(request, user, at);
     return { status: result.status, body: await result.json() };
   };
-  return { call, sqlite, db };
+  // Provision fixtures directly as an administrator, never through the public API.
+  async function seed(userId = "owner") {
+    const id = crypto.randomUUID();
+    const code =
+      crypto.randomUUID().replaceAll("-", "") +
+      crypto.randomUUID().replaceAll("-", "");
+    const digest = Buffer.from(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(code)),
+    ).toString("hex");
+    const state = emptyCatalog(userId, create.priceBasis);
+    sqlite
+      .prepare("INSERT INTO catalog_workspaces VALUES (?, ?, ?, ?, ?, 0, ?, ?)")
+      .run(
+        id,
+        userId,
+        create.name,
+        digest,
+        "2026-10-20T08:00:00.000Z",
+        JSON.stringify(state),
+        now.toISOString(),
+      );
+    options.workspaceId ||= id;
+    return {
+      body: {
+        workspace: {
+          id,
+          name: create.name,
+          revision: 0,
+          data: viewCatalog(state, userId),
+        },
+        invitationCode: code,
+      },
+    };
+  }
+  return { call, seed, sqlite, db, options };
 }
 const create = {
   action: "createWorkspace",
@@ -74,8 +115,8 @@ const cmd = (workspace, action, payload) => ({
 
 const claimant = { name: "认领测试本人", contact: "核实用测试电话" };
 async function issued(setupResult, kind = "claim") {
-  const { call } = setupResult;
-  let w = (await call("owner", create)).body.workspace;
+  const { call, seed } = setupResult;
+  let w = (await seed("owner")).body.workspace;
   if (kind === "claim")
     w = (await call("owner", cmd(w, "registerMerchant", application))).body
       .workspace;
@@ -102,9 +143,160 @@ const inspectAccess = (invitationCode) => ({
   invitationCode,
 });
 
+test("平台只能由管理员离线初始化，重复初始化不覆盖已有账号和数据", async () => {
+  const { call, sqlite, db } = setup();
+  assert.equal((await call("outsider", create)).status, 403);
+  sqlite.exec(
+    initialPlatformSql({
+      ownerId: "trusted-admin",
+      name: "山海供'测试",
+      priceBasis: "统一供货价",
+    }),
+  );
+  const before = await platformRow(db);
+  assert.equal(before.owner_id, "trusted-admin");
+  assert.equal(before.name, "山海供'测试");
+  sqlite.exec(
+    initialPlatformSql({
+      ownerId: "replacement",
+      name: "不可覆盖",
+      priceBasis: "其他口径",
+    }),
+  );
+  assert.deepEqual(await platformRow(db), before);
+  assert.equal((await call("trusted-admin", create)).status, 403);
+  assert.equal(
+    (await call("trusted-admin")).body.workspace.data.access.isOwner,
+    true,
+  );
+  sqlite.close();
+});
+
+test("登录身份决定入口；错误入口不返回后台数据，停用账号不会获得商户身份", async () => {
+  const { call, seed, sqlite } = setup();
+  const created = await seed();
+  const joined = await call("merchant", {
+    action: "applyMerchant",
+    invitationCode: created.body.invitationCode,
+    payload: application,
+  });
+  const raw = JSON.parse(
+    sqlite.prepare("SELECT data FROM catalog_workspaces").get().data,
+  );
+  assert.deepEqual(sessionFor(raw, null), { status: "anonymous" });
+  assert.deepEqual(sessionFor(raw, "outsider"), { status: "unregistered" });
+  assert.deepEqual(sessionFor(raw, "owner"), {
+    status: "member",
+    portal: "operations",
+    isOwner: true,
+  });
+  assert.deepEqual(sessionFor(raw, "merchant"), {
+    status: "member",
+    portal: "merchant",
+    isOwner: false,
+  });
+  raw.members = [{ id: "staff", userId: "staff", status: "disabled" }];
+  assert.deepEqual(sessionFor(raw, "staff"), { status: "disabled" });
+  assert.equal((await call("owner", null, "?portal=operations")).status, 200);
+  assert.equal((await call("owner", null, "?portal=merchant")).status, 403);
+  const forbidden = await call("merchant", null, "?portal=operations");
+  assert.equal(forbidden.status, 403);
+  assert.equal(forbidden.body.workspace, undefined);
+  assert.equal((await call("merchant", null, "?portal=merchant")).status, 200);
+  assert.equal((await call("merchant", create)).status, 403);
+  assert.equal(
+    (
+      await call(
+        "merchant",
+        cmd(joined.body.workspace, "reviewMerchant", {
+          id: joined.body.workspace.data.merchants[0].id,
+          status: "active",
+          note: "越权",
+        }),
+      )
+    ).status,
+    403,
+  );
+  sqlite.close();
+});
+
+test("仅开放服务器指定的统一货盘，历史空间、邀请码和图片不能绕过平台边界", async () => {
+  const { call, seed, sqlite, db, options } = setup();
+  const platform = await seed("owner");
+  const legacy = await seed("legacy-owner");
+  assert.equal((await call("legacy-owner")).body.workspaces.length, 0);
+  assert.equal(
+    (
+      await call(
+        "legacy-owner",
+        null,
+        `?workspaceId=${legacy.body.workspace.id}`,
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await call("owner", null, `?workspaceId=${legacy.body.workspace.id}`))
+      .status,
+    403,
+  );
+  assert.equal(
+    (
+      await call("new", {
+        action: "applyMerchant",
+        invitationCode: legacy.body.invitationCode,
+        payload: application,
+      })
+    ).status,
+    400,
+  );
+  const legacyService = catalogService(db, undefined, {
+    workspaceId: legacy.body.workspace.id,
+  });
+  const generated = await legacyService.handle(
+    new Request("http://localhost/api/catalog", {
+      method: "POST",
+      body: JSON.stringify(
+        cmd(legacy.body.workspace, "issueAccessInvitation", {
+          kind: "operations",
+          label: "历史空间",
+        }),
+      ),
+    }),
+    "legacy-owner",
+  );
+  const secret = (await generated.json()).accessInvitationCode;
+  assert.equal((await call("new", inspectAccess(secret))).status, 404);
+  assert.equal(
+    (
+      await catalogImages(db, {}, options).handle(
+        new Request(
+          `http://localhost/api/catalog/images?workspaceId=${legacy.body.workspace.id}`,
+          { method: "POST", body: "test" },
+        ),
+        "legacy-owner",
+      )
+    ).status,
+    403,
+  );
+  await assert.rejects(() => platformRow(db), /多份历史货盘/);
+  await assert.rejects(
+    () => platformRow(db, { workspaceId: "missing" }),
+    /配置不可用/,
+  );
+  assert.equal((await platformRow(db, options)).id, platform.body.workspace.id);
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS total FROM catalog_workspaces").get()
+      .total,
+    2,
+    "legacy data is preserved",
+  );
+  sqlite.close();
+});
+
 test("代录商户认领需核实，账号绑定保留商户状态、供货与历史，不泄露邀请凭据", async () => {
   const s = setup();
-  const { call, sqlite } = s;
+  const { call, seed, sqlite } = s;
   const invitation = await issued(s);
   const code = invitation.accessInvitationCode;
   const w = invitation.workspace;
@@ -187,7 +379,7 @@ test("代录商户认领需核实，账号绑定保留商户状态、供货与�
 
 test("运营成员必须由负责人核实，不能升级权限；停用立即影响读写和图片接口", async () => {
   const s = setup();
-  const { call, sqlite, db } = s;
+  const { call, seed, sqlite, db, options } = s;
   const invitation = await issued(s, "operations");
   const id = invitation.workspace.id;
   assert.equal(
@@ -297,15 +489,15 @@ test("运营成员必须由负责人核实，不能升级权限；停用立即�
   assert.equal((await call("staff", null, `?workspaceId=${id}`)).status, 200);
   assert.equal(
     (await call("staff", create)).status,
-    201,
-    "staff can separately own another workspace",
+    403,
+    "staff cannot create another platform",
   );
   sqlite.close();
 });
 
 test("认领邀请可撤销、重发和过期，通用入驻邀请码不混用，旧数据无需迁移", async () => {
   const s = setup();
-  const { call, sqlite } = s;
+  const { call, seed, sqlite } = s;
   let result = await issued(s);
   const first = result.accessInvitationCode;
   const id = result.workspace.id;
@@ -415,7 +607,7 @@ test("认领邀请可撤销、重发和过期，通用入驻邀请码不混用�
 
 test("并发认领只保留一个申请；并发确认和撤销不会同时成功", async () => {
   const s = setup();
-  const { call, sqlite } = s;
+  const { call, seed, sqlite } = s;
   const invitation = await issued(s);
   const responses = await Promise.all([
     call("first", requestAccess(invitation.accessInvitationCode)),
@@ -455,10 +647,10 @@ test("并发认领只保留一个申请；并发确认和撤销不会同时成�
 
 test("成员管理拒绝跨空间操作、商户提权及客户端指定绑定身份", async () => {
   const s = setup();
-  const { call, sqlite } = s;
+  const { call, seed, sqlite } = s;
   const invitation = await issued(s);
   const w = invitation.workspace;
-  const other = (await call("otherOwner", create)).body.workspace;
+  const other = (await seed("otherOwner")).body.workspace;
   assert.equal(
     (
       await call(
@@ -482,7 +674,7 @@ test("成员管理拒绝跨空间操作、商户提权及客户端指定绑定�
         }),
       )
     ).status,
-    404,
+    403,
   );
   assert.equal(
     (
@@ -528,11 +720,11 @@ test("成员管理拒绝跨空间操作、商户提权及客户端指定绑定�
 });
 
 test("未登录拒绝访问；运营空间不自动创建且从空数据开始", async () => {
-  const { call, sqlite } = setup();
+  const { call, seed, sqlite } = setup();
   assert.equal((await call(null)).status, 401);
-  assert.deepEqual((await call("owner")).body.workspaces, []);
-  const created = await call("owner", create);
-  assert.equal(created.status, 201);
+  assert.equal((await call("owner")).status, 503);
+  assert.equal((await call("owner", create)).status, 403);
+  const created = await seed("owner");
   assert.equal(created.body.workspace.data.skus.length, 0);
   assert.equal(created.body.workspace.data.access.role, "operations");
   const row = sqlite
@@ -549,8 +741,8 @@ test("未登录拒绝访问；运营空间不自动创建且从空数据开始",
   sqlite.close();
 });
 test("持久化入驻、运营审核与成员隔离，邀请码不授予运营身份", async () => {
-  const { call, sqlite } = setup();
-  const created = await call("owner", create);
+  const { call, seed, sqlite } = setup();
+  const created = await seed("owner");
   const id = created.body.workspace.id;
   assert.equal(
     (await call("outsider", null, `?workspaceId=${id}`)).status,
@@ -599,8 +791,8 @@ test("持久化入驻、运营审核与成员隔离，邀请码不授予运营�
   sqlite.close();
 });
 test("陈旧修订及并发写入不覆盖新数据", async () => {
-  const { call, sqlite } = setup();
-  const created = await call("owner", create);
+  const { call, seed, sqlite } = setup();
+  const created = await seed("owner");
   const w = created.body.workspace;
   const attempts = await Promise.all([
     call("owner", cmd(w, "registerMerchant", application)),
@@ -624,8 +816,8 @@ test("陈旧修订及并发写入不覆盖新数据", async () => {
   sqlite.close();
 });
 test("客户端伪造角色、跨站写入、错误邀请码被拒绝", async () => {
-  const { call, sqlite } = setup();
-  const created = await call("owner", create);
+  const { call, seed, sqlite } = setup();
+  const created = await seed("owner");
   assert.equal(
     (
       await call("owner", {
@@ -659,8 +851,8 @@ test("客户端伪造角色、跨站写入、错误邀请码被拒绝", async ()
   sqlite.close();
 });
 test("更新邀请码使旧代码失效，已入驻成员不受影响", async () => {
-  const { call, sqlite } = setup();
-  const created = await call("owner", create);
+  const { call, seed, sqlite } = setup();
+  const created = await seed("owner");
   await call("a", {
     action: "applyMerchant",
     invitationCode: created.body.invitationCode,
@@ -697,10 +889,10 @@ test("上传图片使用持久化存储，隔离草稿与不同空间，公开 S
       return o ? { ...o, body: new Response(o.bytes).body } : null;
     },
   };
-  const { call, sqlite, db } = setup(bucket);
-  const created = await call("owner", create);
+  const { call, seed, sqlite, db, options } = setup(bucket);
+  const created = await seed("owner");
   const w = created.body.workspace;
-  const images = catalogImages(db, bucket);
+  const images = catalogImages(db, bucket, options);
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGaIAAAAASUVORK5CYII=",
     "base64",
@@ -788,11 +980,11 @@ test("上传图片使用持久化存储，隔离草稿与不同空间，公开 S
   );
   assert.equal(published.status, 200);
   assert.equal((await read("merchant")).status, 200);
-  const other = await call("other-owner", create);
+  const other = await seed("other-owner");
   assert.equal(
     (await call("other-owner", cmd(other.body.workspace, "submitSku", product)))
       .status,
-    400,
+    403,
   );
   assert.equal((await upload("merchant")).status, 201);
   sqlite.close();

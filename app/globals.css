@@ -2022,7 +2022,75 @@ footer button {
 .accept-summary h2 {
   margin-top: 8px;
 }
+.login-entry {
+  min-height: 100dvh;
+  align-items: center;
+  padding: 60px max(24px, 7vw);
+}
+.login-role {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 48px;
+  font-size: 15px;
+  color: var(--muted);
+}
+.login-card {
+  max-width: 470px;
+  justify-self: end;
+}
+.login-card h2 {
+  font-size: 28px;
+  margin-bottom: 14px;
+}
+.login-card p {
+  line-height: 1.8;
+  margin: 14px 0;
+}
+.login-card .btn {
+  width: 100%;
+  justify-content: center;
+  margin: 22px 0 12px;
+}
+.login-card .text-button {
+  display: block;
+  margin: 20px 0;
+}
+.login-other {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 36px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+}
+.operations-login .entry-intro {
+  color: #233d4b;
+}
+.login-account {
+  overflow-wrap: anywhere;
+}
+.platform-name {
+  color: var(--muted);
+  font-size: 12px;
+}
 @media (max-width: 700px) {
+  .login-entry {
+    padding: 24px 16px;
+    gap: 28px;
+  }
+  .login-role {
+    margin-top: 20px;
+  }
+  .login-card {
+    max-width: none;
+    justify-self: stretch;
+  }
+  .platform-name {
+    display: none;
+  }
   .access-row {
     align-items: flex-start;
     flex-direction: column;

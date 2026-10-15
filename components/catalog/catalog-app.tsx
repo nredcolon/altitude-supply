@@ -34,6 +34,7 @@ import {
 } from "../../lib/catalog/maintenance";
 import { ImageField } from "./image-field";
 import { AccessManagement } from "./access-management";
+import type { Portal } from "../../lib/catalog/platform";
 import type {
   CatalogResponse,
   Merchant,
@@ -69,12 +70,10 @@ const categories = ["家居日用", "家纺布艺", "箱包配饰", "其他"];
 
 export default function CatalogApp({
   displayName,
-  authenticated = true,
-  entry = "join",
+  portal,
 }: {
   displayName: string;
-  authenticated?: boolean;
-  entry?: "join" | "create";
+  portal: Portal;
 }) {
   const [result, setResult] = useState<CatalogResponse>({ workspaces: [] });
   const [loading, setLoading] = useState(true);
@@ -86,10 +85,8 @@ export default function CatalogApp({
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [mobile, setMobile] = useState(false);
-  const [entryMode, setEntryMode] = useState<"create" | "join">(entry);
   const [invitationCode, setInvitationCode] = useState("");
   const [origin, setOrigin] = useState("");
-  const [showEntry, setShowEntry] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [skuId, setSkuId] = useState("");
   const workspace = result.workspace;
@@ -111,7 +108,7 @@ export default function CatalogApp({
     setError("");
     try {
       const response = await fetch(
-        `/api/catalog${id ? `?workspaceId=${encodeURIComponent(id)}` : ""}`,
+        `/api/catalog?portal=${portal}${id ? `&workspaceId=${encodeURIComponent(id)}` : ""}`,
       );
       const body = (await response.json()) as CatalogResponse;
       if (!response.ok) {
@@ -120,6 +117,13 @@ export default function CatalogApp({
         throw new Error(body.error || "读取失败");
       }
       setResult(body);
+      if (body.workspace) {
+        try {
+          sessionStorage.removeItem("shanhai.join");
+        } catch {
+          /* Storage may be unavailable. */
+        }
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -145,17 +149,9 @@ export default function CatalogApp({
         "",
         window.location.pathname + window.location.search,
       );
-    if (entry === "join" && saved) {
-      setInvitationCode(saved);
-      setShowEntry(true);
-    }
-    if (authenticated)
-      void load(
-        new URLSearchParams(window.location.search).get("workspaceId") ||
-          undefined,
-      );
-    else setLoading(false);
-  }, [authenticated, entry]);
+    if (portal === "merchant" && saved) setInvitationCode(saved);
+    void load();
+  }, [portal]);
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(""), 4500);
@@ -187,7 +183,6 @@ export default function CatalogApp({
         setInvitationCode("");
       }
       setDialog(null);
-      setShowEntry(false);
       setToast("已保存");
       return true;
     } catch (e) {
@@ -568,7 +563,7 @@ export default function CatalogApp({
   }
 
   let content: ReactNode;
-  if (!data || showEntry) {
+  if (!data) {
     content = (
       <main className="entry">
         <div className="entry-intro">
@@ -594,134 +589,67 @@ export default function CatalogApp({
           </div>
         </div>
         <section className="entry-card">
-          {!authenticated ? (
-            <div className="sign-in-card">
-              <h2>欢迎加入山海供</h2>
-              <p className="muted">
-                登录后提交经营资料，通过审核即可维护供货商品。
-              </p>
-              {invitationCode && (
-                <p className="notice">已收到入驻邀请，登录后继续填写申请。</p>
-              )}
-              <a
-                className="btn primary"
-                href="/signin-with-chatgpt?return_to=%2Fmerchant"
-                target="_top"
-              >
-                使用 ChatGPT 账号登录 <ArrowRight size={16} />
-              </a>
-            </div>
-          ) : (
+          <h2>{portal === "merchant" ? "商户申请入驻" : "运营访问状态"}</h2>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+          {portal === "merchant" ? (
             <>
-              <div className="tabs">
-                <button
-                  className={entryMode === "create" ? "active" : ""}
-                  onClick={() => setEntryMode("create")}
-                >
-                  运营建立空间
-                </button>
-                <button
-                  className={entryMode === "join" ? "active" : ""}
-                  onClick={() => setEntryMode("join")}
-                >
-                  商户申请入驻
-                </button>
-              </div>
-              {error && (
-                <p className="error" role="alert">
-                  {error}
-                </p>
-              )}
+              <p className="muted">
+                使用运营提供的入驻邀请码提交资料。已有档案的商户请使用专属认领链接。
+              </p>
               <form
-                key={entryMode}
                 onSubmit={(e) => {
                   e.preventDefault();
                   const f = new FormData(e.currentTarget);
-                  const v = (k: string) => String(f.get(k) || "");
-                  if (entryMode === "create")
-                    void submit({
-                      action: "createWorkspace",
-                      name: v("name"),
-                      priceBasis: v("priceBasis"),
-                    });
-                  else
-                    void submit({
-                      action: "applyMerchant",
-                      invitationCode: v("invitationCode"),
-                      payload: {
-                        name: v("name"),
-                        contact: v("contact"),
-                        location: v("location"),
-                        categories: v("categories"),
-                      },
-                    });
+                  const value = (key: string) => String(f.get(key) || "");
+                  void submit({
+                    action: "applyMerchant",
+                    invitationCode: value("invitationCode"),
+                    payload: {
+                      name: value("name"),
+                      contact: value("contact"),
+                      location: value("location"),
+                      categories: value("categories"),
+                    },
+                  });
                 }}
               >
-                {entryMode === "create" ? (
-                  <>
-                    <h2>建立你的运营空间</h2>
-                    <p className="muted">
-                      从空白货盘开始，当前账号成为该空间运营负责人。
-                    </p>
-                    <Field label="空间名称">
-                      <input
-                        name="name"
-                        required
-                        maxLength={160}
-                        defaultValue="山海供 · 螺蛳湾货盘"
-                      />
-                    </Field>
-                    <Field
-                      label="统一供货价格口径"
-                      hint="整个空间按相同口径维护商户价格，创建后由系统统一展示。"
-                    >
-                      <input
-                        name="priceBasis"
-                        required
-                        maxLength={160}
-                        defaultValue="人民币含税商品供货价，国内运费另计"
-                      />
-                    </Field>
-                  </>
-                ) : (
-                  <>
-                    <h2>加入运营空间</h2>
-                    <p className="muted">
-                      使用运营提供的邀请码，提交经营资料。审核通过后可维护供货商品。
-                    </p>
-                    <Field label="入驻邀请码">
-                      <input
-                        name="invitationCode"
-                        autoComplete="off"
-                        required
-                        minLength={64}
-                        maxLength={64}
-                        value={invitationCode}
-                        onChange={(e) => setInvitationCode(e.target.value)}
-                      />
-                    </Field>
-                    <MerchantFields />
-                  </>
-                )}
+                <Field label="入驻邀请码">
+                  <input
+                    name="invitationCode"
+                    autoComplete="off"
+                    required
+                    minLength={64}
+                    maxLength={64}
+                    value={invitationCode}
+                    onChange={(e) => setInvitationCode(e.target.value)}
+                  />
+                </Field>
+                <MerchantFields />
                 <button className="btn primary" disabled={busy || loading}>
-                  {busy
-                    ? "保存中…"
-                    : entryMode === "create"
-                      ? "建立运营空间"
-                      : "提交入驻申请"}
+                  {busy ? "提交中…" : "提交入驻申请"}
                   <ArrowRight size={16} />
                 </button>
               </form>
-              {workspace && (
-                <button
-                  className="text-button"
-                  onClick={() => setShowEntry(false)}
-                >
-                  返回现有空间
-                </button>
-              )}
+              <a className="text-button" href="/accept">
+                查看已有档案的认领申请
+              </a>
             </>
+          ) : (
+            <p className="notice">
+              当前账号无法进入运营后台，请联系平台管理员核实权限。
+            </p>
           )}
+          <a
+            className="text-button"
+            href={`/signout-with-chatgpt?return_to=${encodeURIComponent(`/${portal}/login`)}`}
+            target="_top"
+          >
+            切换登录账号
+          </a>
         </section>
       </main>
     );
@@ -898,7 +826,7 @@ export default function CatalogApp({
             </button>
             <a
               className="text-button"
-              href="/signout-with-chatgpt?return_to=%2Fmerchant"
+              href="/signout-with-chatgpt?return_to=%2Fmerchant%2Flogin"
               target="_top"
             >
               退出登录
@@ -1171,7 +1099,7 @@ export default function CatalogApp({
       : undefined;
   return (
     <div className="app-shell">
-      {data && !showEntry && (
+      {data && (
         <>
           <aside className={`sidebar ${mobile ? "open" : ""}`}>
             <div className="brand">
@@ -1249,7 +1177,7 @@ export default function CatalogApp({
           )}
         </>
       )}
-      <div className={data && !showEntry ? "main-shell" : "welcome-shell"}>
+      <div className={data ? "main-shell" : "welcome-shell"}>
         <header className="topbar">
           <div>
             <button
@@ -1260,45 +1188,31 @@ export default function CatalogApp({
               <Menu size={21} />
             </button>
             <span>
-              {data && !showEntry ? pageNames[page] : "山海供 · 商户与运营入口"}
+              {data
+                ? pageNames[page]
+                : `山海供 · ${portal === "merchant" ? "商户入驻" : "运营后台"}`}
             </span>
           </div>
           <div className="topbar-right">
-            {result.workspaces.length > 0 && (
-              <label className="workspace-switch">
-                <span className="sr-only">切换运营空间</span>
-                <select
-                  value={workspace?.id || ""}
-                  onChange={(e) => {
-                    setShowEntry(false);
-                    navigate("overview");
-                    void load(e.target.value);
-                  }}
-                >
-                  {result.workspaces.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            {workspace && (
+              <span className="platform-name">{workspace.name}</span>
             )}
             <span className="account">
               <i>{displayName.slice(0, 1) || "山"}</i>
               <span>
                 {data
                   ? ops
-                    ? "平台运营"
+                    ? data.access.role === "operations" && data.access.isOwner
+                      ? "平台管理员"
+                      : "平台运营"
                     : "供货商户"
-                  : authenticated
-                    ? "已登录"
-                    : "欢迎入驻"}
+                  : "已登录"}
                 <small>{displayName}</small>
               </span>
             </span>
           </div>
         </header>
-        {data && !showEntry ? (
+        {data ? (
           <main className="main-content">
             <div className="page-heading">
               <div>
@@ -1388,14 +1302,14 @@ export default function CatalogApp({
                   <input
                     aria-label="商户入驻链接"
                     readOnly
-                    value={`${origin}/merchant#invite=${result.invitationCode}`}
+                    value={`${origin}/merchant/login#invite=${result.invitationCode}`}
                   />
                   <button
                     className="btn"
                     onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(
-                          `${window.location.origin}/merchant#invite=${result.invitationCode!}`,
+                          `${window.location.origin}/merchant/login#invite=${result.invitationCode!}`,
                         );
                         setToast("入驻链接已复制");
                       } catch {
@@ -1432,14 +1346,14 @@ export default function CatalogApp({
                   <input
                     aria-label="专属账号邀请链接"
                     readOnly
-                    value={`${origin}/accept#access=${result.accessInvitationCode}`}
+                    value={`${origin}/${result.accessInvitationKind === "operations" ? "operations" : "merchant"}/login#access=${result.accessInvitationCode}`}
                   />
                   <button
                     className="btn"
                     onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(
-                          `${window.location.origin}/accept#access=${result.accessInvitationCode}`,
+                          `${window.location.origin}/${result.accessInvitationKind === "operations" ? "operations" : "merchant"}/login#access=${result.accessInvitationCode}`,
                         );
                         setToast("专属邀请链接已复制");
                       } catch {
@@ -1488,14 +1402,12 @@ export default function CatalogApp({
             )}
             <footer>
               <span>山海供 · 海外供货平台</span>
-              <button
-                onClick={() => {
-                  setEntryMode("join");
-                  setShowEntry(true);
-                }}
+              <a
+                href={`/signout-with-chatgpt?return_to=${encodeURIComponent(`/${portal}/login`)}`}
+                target="_top"
               >
-                申请加入其他空间
-              </button>
+                退出登录
+              </a>
               <span>商户免费入驻 · 供货资料独立维护</span>
             </footer>
           </main>

@@ -19,15 +19,51 @@ const post = (body, extra = {}) =>
     headers: { ...headers, ...extra },
     body: JSON.stringify(body),
   });
-if (!data.workspace) {
-  response = await post({
-    action: "createWorkspace",
-    name: "本地接口验证空间",
-    priceBasis: "示例人民币供货价",
+assert.ok(data.workspace, "请先由管理员初始化本地平台，并使用已授权的开发账号");
+assert.equal(
+  (
+    await post({
+      action: "createWorkspace",
+      name: "禁止自建",
+      priceBasis: "测试",
+    })
+  ).status,
+  403,
+);
+for (const portal of ["merchant", "operations"]) {
+  const page = await fetch(`${base}/${portal}/login`);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.ok(html.includes(portal === "merchant" ? "商户登录" : "运营登录"));
+  assert.ok(!html.includes("运营建立空间"));
+  const protectedPage = await fetch(`${base}/${portal}`, {
+    redirect: "manual",
   });
-  assert.equal(response.status, 201);
-  data = await response.json();
+  assert.equal(protectedPage.status, 307);
+  assert.ok(protectedPage.headers.get("Location").endsWith(`/${portal}/login`));
 }
+assert.equal(
+  data.workspace.data.access.role,
+  "operations",
+  "smoke test requires the existing local administrator",
+);
+const wrongEntry = await fetch(`${base}/merchant`, {
+  headers: { cookie },
+  redirect: "manual",
+});
+assert.equal(wrongEntry.status, 307);
+assert.ok(wrongEntry.headers.get("Location").endsWith("/operations"));
+assert.equal(
+  (await fetch(`${base}/api/catalog?portal=merchant`, { headers })).status,
+  403,
+);
+assert.equal(
+  (await fetch(`${base}/operations`, { headers: { cookie } })).status,
+  200,
+);
+console.log(
+  "PASS: separate login pages, anonymous redirects, authenticated role redirect, wrong-portal API rejection, and closed workspace creation endpoint.",
+);
 let w = data.workspace;
 const payload = {
   name: `示例接口商户-${Date.now()}`,

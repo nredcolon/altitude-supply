@@ -9,10 +9,9 @@ async function handle(request: Request) {
       { error: "数据库尚未准备好，请先运行迁移" },
       { status: 503 },
     );
-  return catalogService(env.DB, env.BUCKET).handle(
-    request,
-    user?.userId || null,
-  );
+  return catalogService(env.DB, env.BUCKET, {
+    workspaceId: env.SHANHAI_WORKSPACE_ID,
+  }).handle(request, user?.userId || null);
 }
 export const GET = handle;
 export const POST = handle;

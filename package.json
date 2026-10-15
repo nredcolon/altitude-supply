@@ -1,11 +1,12 @@
 {
   "name": "luosi-overseas-supply",
-  "version": "0.2.0-alpha.3",
+  "version": "0.2.0-alpha.4",
   "private": true,
   "engines": {
     "node": ">=24.0.0"
   },
   "scripts": {
+    "platform:setup": "node scripts/platform-setup.mjs",
     "install:ci": "node scripts/install-ci.mjs",
     "dev": "node scripts/run-framework.mjs dev",
     "build": "node scripts/run-framework.mjs build",

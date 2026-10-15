@@ -77,12 +77,11 @@ export default function AcceptInvitation({
             <p>
               使用本人的账号登录，核对邀请并提交申请。已有商品与供货资料会保留，运营确认后即可接手维护。
             </p>
-            <a
-              className="btn primary"
-              target="_top"
-              href="/signin-with-chatgpt?return_to=%2Faccept"
-            >
-              使用 ChatGPT 账号登录
+            <a className="btn primary" href="/merchant/login?next=accept">
+              商户登录并认领
+            </a>
+            <a className="btn" href="/operations/login?next=accept">
+              运营成员登录
             </a>
           </>
         ) : (

@@ -15,7 +15,7 @@ export default function Home() {
           <b>山海供</b>
           <span>SHANHAI SUPPLY</span>
         </a>
-        <a href="/operations">
+        <a href="/operations/login">
           运营登录 <ArrowRight size={15} />
         </a>
       </header>
@@ -32,7 +32,7 @@ export default function Home() {
             <br />
             让平台组织货源，连接海外采购。
           </p>
-          <a className="btn primary" href="/merchant">
+          <a className="btn primary" href="/merchant/login">
             进入商户供货端 <ArrowRight size={18} />
           </a>
           <small>
@@ -51,7 +51,7 @@ export default function Home() {
         </div>
       </section>
       <section className="portal-cards">
-        <a href="/merchant">
+        <a href="/merchant/login">
           <Store size={27} />
           <h2>我是供货商户</h2>
           <p>申请入驻、关联商品，随时更新供货价、数量和交期。</p>
@@ -59,7 +59,7 @@ export default function Home() {
             进入供货端 <ArrowRight size={16} />
           </span>
         </a>
-        <a href="/operations">
+        <a href="/operations/login">
           <Layers3 size={27} />
           <h2>我是平台运营</h2>
           <p>审核商户与商品，集中管理同款商品的多家供货条件。</p>

@@ -6,8 +6,7 @@ export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!env.DB)
     return Response.json({ error: "数据库尚未准备好" }, { status: 503 });
-  return catalogImages(env.DB, env.BUCKET).handle(
-    request,
-    user?.userId || null,
-  );
+  return catalogImages(env.DB, env.BUCKET, {
+    workspaceId: env.SHANHAI_WORKSPACE_ID,
+  }).handle(request, user?.userId || null);
 }

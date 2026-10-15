@@ -4,12 +4,12 @@ import {
   applyApplication,
   applyCatalogCommand,
   CatalogError,
-  emptyCatalog,
   ensure,
   viewCatalog,
 } from "./domain.ts";
 import type { CatalogResponse, CatalogState, WorkspaceSummary } from "./types";
 import { catalogImages } from "./images.ts";
+import { platformRow, sessionFor, type PlatformOptions } from "./platform.ts";
 import {
   applyMembershipCommand,
   inspectInvitation,
@@ -24,7 +24,6 @@ interface Row {
   revision: number;
   data: string;
 }
-const label = z.string().trim().min(1).max(160);
 const identity = z.string().min(1).max(200);
 const commandSchema = z
   .object({
@@ -56,42 +55,21 @@ async function hash(value: string) {
 const invitationExpiry = (now: Date) =>
   new Date(now.getTime() + 7 * 86400000).toISOString();
 
-export function catalogService(db: D1Database, bucket?: R2Bucket) {
+export function catalogService(
+  db: D1Database,
+  bucket?: R2Bucket,
+  options: PlatformOptions = {},
+) {
   async function list(userId: string): Promise<WorkspaceSummary[]> {
-    const result = await db
-      .prepare(
-        `SELECT id, name, owner_id, EXISTS (
-          SELECT 1 FROM json_each(w.data, '$.members') AS member
-          WHERE json_extract(member.value, '$.userId') = ? AND json_extract(member.value, '$.status') = 'active'
-        ) AS is_operator FROM catalog_workspaces AS w
-      WHERE owner_id = ? OR EXISTS (
-        SELECT 1 FROM json_each(w.data, '$.merchants') AS m WHERE json_extract(m.value, '$.userId') = ?
-      ) OR EXISTS (
-        SELECT 1 FROM json_each(w.data, '$.members') AS member
-        WHERE json_extract(member.value, '$.userId') = ? AND json_extract(member.value, '$.status') = 'active'
-      ) ORDER BY updated_at DESC`,
-      )
-      .bind(userId, userId, userId, userId)
-      .all<{
-        id: string;
-        name: string;
-        owner_id: string;
-        is_operator: number;
-      }>();
-    return result.results.map((r) => ({
-      id: r.id,
-      name: r.name,
-      role: r.owner_id === userId || r.is_operator ? "operations" : "merchant",
-    }));
+    const row = await platformRow(db, options);
+    const session = sessionFor(JSON.parse(row.data), userId);
+    return session.status === "member"
+      ? [{ id: row.id, name: row.name, role: session.portal }]
+      : [];
   }
   async function getRow(id: string) {
-    const row = await db
-      .prepare(
-        "SELECT id, owner_id, name, revision, data FROM catalog_workspaces WHERE id = ?",
-      )
-      .bind(id)
-      .first<Row>();
-    ensure(row, "运营空间不存在", 404);
+    const row = await platformRow(db, options);
+    ensure(id === row.id, "不能访问其他平台货盘", 403);
     return row;
   }
   async function response(
@@ -131,13 +109,27 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
     ): Promise<Response> {
       try {
         ensure(userId, "请先登录", 401);
-        if (request.method === "GET")
-          return reply(
-            await response(
-              userId,
-              new URL(request.url).searchParams.get("workspaceId") || undefined,
-            ),
+        if (request.method === "GET") {
+          const url = new URL(request.url);
+          const result = await response(
+            userId,
+            url.searchParams.get("workspaceId") || undefined,
           );
+          const portal = url.searchParams.get("portal");
+          if (portal) {
+            ensure(
+              portal === "merchant" || portal === "operations",
+              "入口无效",
+            );
+            if (result.workspace)
+              ensure(
+                result.workspace.data.access.role === portal,
+                "请使用对应账号入口",
+                403,
+              );
+          }
+          return reply(result);
+        }
         ensure(request.method === "POST", "不支持的请求方式", 405);
         const origin = request.headers.get("origin");
         ensure(
@@ -151,53 +143,11 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
           .object({ action: z.string() })
           .passthrough()
           .parse(JSON.parse(text));
-        if (input.action === "createWorkspace") {
-          const p = z
-            .object({
-              action: z.literal("createWorkspace"),
-              name: label,
-              priceBasis: label,
-            })
-            .strict()
-            .parse(input);
-          ensure(
-            !(await db
-              .prepare("SELECT id FROM catalog_workspaces WHERE owner_id = ?")
-              .bind(userId)
-              .first()),
-            "该账号已创建运营空间",
-          );
-          const id = crypto.randomUUID();
-          const invitationCode = token();
-          const expiry = invitationExpiry(now);
-          const inserted = await db
-            .prepare(
-              "INSERT OR IGNORE INTO catalog_workspaces (id, owner_id, name, invite_hash, invite_expires_at, revision, data, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
-            )
-            .bind(
-              id,
-              userId,
-              p.name,
-              await hash(invitationCode),
-              expiry,
-              JSON.stringify(emptyCatalog(userId, p.priceBasis)),
-              now.toISOString(),
-            )
-            .run();
-          ensure(
-            inserted.meta.changes === 1,
-            "该账号已有运营空间，请刷新",
-            409,
-          );
-          return reply(
-            {
-              ...(await response(userId, id)),
-              invitationCode,
-              invitationExpiresAt: expiry,
-            },
-            201,
-          );
-        }
+        ensure(
+          input.action !== "createWorkspace",
+          "平台由管理员统一初始化，不能自行创建运营空间",
+          403,
+        );
         if (
           ["inspectAccessInvitation", "requestAccess"].includes(input.action)
         ) {
@@ -210,15 +160,7 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
             .strict()
             .parse(input);
           const tokenHash = await hash(p.invitationCode);
-          const row = await db
-            .prepare(
-              `SELECT id, owner_id, name, revision, data FROM catalog_workspaces AS w
-            WHERE EXISTS (SELECT 1 FROM json_each(w.data, '$.accessInvitations') AS i
-              WHERE json_extract(i.value, '$.tokenHash') = ?)`,
-            )
-            .bind(tokenHash)
-            .first<Row>();
-          ensure(row, "邀请无效，请联系运营重新发送", 404);
+          const row = await platformRow(db, options);
           let state: CatalogState = JSON.parse(row.data);
           if (p.action === "requestAccess") {
             state = requestMembership(state, tokenHash, userId, p.payload, now);
@@ -245,13 +187,12 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
             })
             .strict()
             .parse(input);
-          const row = await db
-            .prepare(
-              "SELECT id, owner_id, name, revision, data FROM catalog_workspaces WHERE invite_hash = ? AND invite_expires_at > ?",
-            )
-            .bind(await hash(p.invitationCode), now.toISOString())
-            .first<Row>();
-          ensure(row, "邀请码无效或已过期，请联系运营");
+          const row = await platformRow(db, options);
+          ensure(
+            row.invite_hash === (await hash(p.invitationCode)) &&
+              row.invite_expires_at > now.toISOString(),
+            "邀请码无效或已过期，请联系运营",
+          );
           await save(
             row,
             applyApplication(JSON.parse(row.data), userId, p.payload, now),
@@ -283,6 +224,7 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
               accessInvitationCode: code,
               accessInvitationExpiresAt: invitation!.expiresAt,
               accessInvitationLabel: invitation!.label,
+              accessInvitationKind: invitation!.kind,
             }),
           });
         }
@@ -302,7 +244,7 @@ export function catalogService(db: D1Database, bucket?: R2Bucket) {
               parsed.searchParams.get("workspaceId") === row.id,
               "图片必须属于当前运营空间",
             );
-            const read = await catalogImages(db, bucket).handle(
+            const read = await catalogImages(db, bucket, options).handle(
               new Request(parsed),
               userId,
               parsed.pathname.split("/").at(-1),

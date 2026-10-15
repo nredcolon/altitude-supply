@@ -131,5 +131,6 @@ export interface CatalogResponse {
   accessInvitationCode?: string;
   accessInvitationExpiresAt?: string;
   accessInvitationLabel?: string;
+  accessInvitationKind?: "claim" | "operations";
   error?: string;
 }
