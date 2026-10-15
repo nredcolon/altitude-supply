@@ -4,6 +4,14 @@
 
 目标代码仓库：[nredcolon/altitude-supply](https://github.com/nredcolon/altitude-supply)。首次同步前已检查为空仓库。主分支为 `main`，开发分支为 `codex/catalog-foundation`，首次同步采用同一份通过本地检查的项目代码。
 
+2026年10月15日同步状态：本地已绑定 `origin`，两个本地分支包含本轮实现，但远端仍为空仓库。HTTPS 推送缺少本机登录凭据；GitHub 连接的内容写入返回 `403 Resource not accessible by integration`；现有 SSH 连接也未成功。需要补齐 GitHub 连接的内容写权限或本机 Git 推送凭据后，再执行首次推送。未强推、未向其他仓库上传源码，远程 CI 尚未运行。
+
+首次推送命令：
+
+```sh
+git push -u origin main codex/catalog-foundation
+```
+
 后续开发在 `codex/` 前缀分支提交，通过 PR 合入 `main`。常规同步：
 
 ```sh

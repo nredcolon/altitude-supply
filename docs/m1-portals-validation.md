@@ -43,3 +43,5 @@
 - 海外选品端、自动组货和对外报价继续按 B1、M2、M3 排期。
 
 GitHub 同步目标为 [nredcolon/altitude-supply](https://github.com/nredcolon/altitude-supply)。代码同步与网站上线分别处理，CI 仅运行检查和构建。
+
+本轮首次同步因写入凭据受阻：本机 HTTPS 无可用凭据，GitHub 连接返回内容写入403，SSH 连接失败。再次读取确认目标仍为空仓库。已将具体恢复方式记录在 [GitHub 维护说明](github.md)，尚不能宣称远端代码或 CI 已验证。
