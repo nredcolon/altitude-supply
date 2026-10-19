@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { deliveryLabel } from "../lib/catalog/standards.ts";
 const base = "http://127.0.0.1:5178";
 assert.equal((await fetch(base + "/api/catalog")).status, 401);
 const login = await fetch(base + "/signin-with-chatgpt?return_to=/", {
@@ -65,6 +66,16 @@ console.log(
   "PASS: separate login pages, anonymous redirects, authenticated role redirect, wrong-portal API rejection, and closed workspace creation endpoint.",
 );
 let w = data.workspace;
+const template = w.data.categoryTemplates?.find((t) => t.active);
+const point = w.data.deliveryPoints?.find((p) => p.active);
+assert.ok(
+  !w.data.categoryTemplates?.length || template,
+  "验证需要至少一个启用的品类模板",
+);
+assert.ok(
+  !w.data.deliveryPoints?.length || point,
+  "验证需要至少一个启用的交货点",
+);
 const payload = {
   name: `示例接口商户-${Date.now()}`,
   contact: "本地测试",
@@ -151,7 +162,15 @@ const skuCode = `API-${Date.now()}`;
 await apply("submitSku", {
   code: skuCode,
   name: "示例维护验证商品",
-  category: "家居日用",
+  category: template?.name || "家居日用",
+  ...(template
+    ? {
+        categoryTemplateId: template.id,
+        attributes: Object.fromEntries(
+          template.attributes.map((label) => [label, `本地验证${label}`]),
+        ),
+      }
+    : {}),
   origin: "本地测试",
   model: skuCode,
   material: "测试材料",
@@ -180,8 +199,11 @@ await apply("saveOffer", {
   minimumQuantity: 10,
   quantityStep: 10,
   leadDays: 3,
-  deliveryLocation: "本地验证交货点",
+  deliveryLocation: point ? deliveryLabel(point) : "本地验证交货点",
+  ...(point ? { deliveryPointId: point.id } : {}),
   validUntil: day(1),
+  conditionsConfirmed: true,
+  confirmationNote: "本地验证已核实自由可供数量，无实际采购",
 });
 let offer = w.data.offers.find((o) => o.skuId === sku.id);
 await apply("reviewOffer", {
@@ -195,6 +217,7 @@ await apply("updateOfferTerms", {
   id: offer.id,
   expectedVersion: offer.version,
   availableQuantity: 20,
+  conditionsConfirmed: true,
   confirmationNote: "本地改量验证，无实际采购",
 });
 offer = w.data.offers.find((o) => o.id === offer.id);

@@ -18,6 +18,8 @@ export interface Sku {
   code: string;
   name: string;
   category: string;
+  categoryTemplateId?: string;
+  attributes?: Record<string, string>;
   origin: string;
   model: string;
   material: string;
@@ -44,6 +46,8 @@ export interface Offer {
   quantityStep: number;
   leadDays: number;
   deliveryLocation: string;
+  deliveryPointId?: string;
+  quantityBasis?: "free-supply-v1";
   validUntil: string;
   status: "pending" | "active" | "paused" | "rejected";
   version: number;
@@ -71,6 +75,22 @@ export interface CatalogState {
   events: CatalogEvent[];
   members?: OperationsMember[];
   accessInvitations?: AccessInvitation[];
+  categoryTemplates?: CategoryTemplate[];
+  deliveryPoints?: DeliveryPoint[];
+}
+
+// Definitions are immutable after creation. Disable and create a new definition to revise it.
+export interface CategoryTemplate {
+  id: string;
+  name: string;
+  attributes: string[];
+  active: boolean;
+}
+export interface DeliveryPoint {
+  id: string;
+  name: string;
+  address: string;
+  active: boolean;
 }
 
 export interface OperationsMember {

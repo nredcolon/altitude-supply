@@ -15,6 +15,7 @@ import {
   applyMembershipCommand,
   requestMembership,
 } from "../lib/catalog/membership.ts";
+import { deliveryLabel, QUANTITY_BASIS } from "../lib/catalog/standards.ts";
 
 const now = new Date("2026-10-13T08:00:00Z");
 const merchant = {
@@ -38,6 +39,289 @@ const sku = {
 };
 const act = (s, action, payload, user = "owner") =>
   applyCatalogCommand(s, user, action, payload, now);
+
+test("货盘标准仅管理员可维护，普通运营及商户不能修改，定义不可原地重写", () => {
+  const s = fixture();
+  s.members = [
+    {
+      id: "op",
+      userId: "staff",
+      name: "测试运营",
+      contact: "测试",
+      status: "active",
+      joinedAt: now.toISOString(),
+    },
+  ];
+  const category = { name: "收纳篮", attributes: ["颜色", "尺寸"] };
+  for (const user of ["merchantA", "staff"]) {
+    assert.throws(
+      () => act(s, "createCategoryTemplate", category, user),
+      /只有管理员/,
+    );
+    assert.throws(
+      () =>
+        act(
+          s,
+          "createDeliveryPoint",
+          { name: "测试仓", address: "测试地址" },
+          user,
+        ),
+      /只有管理员/,
+    );
+  }
+  let next = act(s, "createCategoryTemplate", category);
+  const template = next.categoryTemplates[0];
+  assert.deepEqual(s.categoryTemplates, []);
+  assert.throws(
+    () => act(next, "createCategoryTemplate", category),
+    /名称已存在/,
+  );
+  assert.throws(
+    () =>
+      act(next, "createCategoryTemplate", {
+        name: "坏模板",
+        attributes: ["颜色", " 颜色 "],
+      }),
+    /不能重复/,
+  );
+  assert.throws(
+    () =>
+      act(
+        next,
+        "setStandardStatus",
+        { kind: "category", id: template.id, active: false },
+        "staff",
+      ),
+    /只有管理员/,
+  );
+  next = act(next, "setStandardStatus", {
+    kind: "category",
+    id: template.id,
+    active: false,
+  });
+  assert.deepEqual(next.categoryTemplates[0].attributes, template.attributes);
+  assert.equal(next.categoryTemplates[0].active, false);
+  assert.throws(() =>
+    act(next, "setStandardStatus", {
+      kind: "category",
+      id: template.id,
+      active: true,
+      attributes: [],
+    }),
+  );
+  assert.match(next.events[0].detail, /收纳篮/);
+});
+
+test("品类模板强制完整属性，参与同款判定；属性顺序不影响查重，颜色不同保持独立 SKU", () => {
+  let s = act(fixture(), "createCategoryTemplate", {
+    name: "收纳篮",
+    attributes: ["颜色", "尺寸"],
+  });
+  const template = s.categoryTemplates[0];
+  const input = {
+    ...sku,
+    code: "TPL-01",
+    category: template.name,
+    categoryTemplateId: template.id,
+    attributes: { 颜色: "白色", 尺寸: "32×24×18cm" },
+  };
+  assert.throws(
+    () => act(s, "submitSku", { ...input, attributes: { 颜色: "白色" } }),
+    /全部属性/,
+  );
+  assert.throws(
+    () =>
+      act(s, "submitSku", {
+        ...input,
+        attributes: { 颜色: "白色", 尺寸: "32", 额外: "值" },
+      }),
+    /全部属性/,
+  );
+  assert.throws(
+    () => act(s, "submitSku", { ...input, category: "其他" }),
+    /品类与模板不一致/,
+  );
+  assert.throws(
+    () => act(s, "submitSku", { ...sku, code: "NO-TPL" }),
+    /请选择启用/,
+  );
+  s = act(s, "submitSku", input, "merchantA");
+  assert.throws(
+    () =>
+      act(s, "submitSku", {
+        ...input,
+        code: "DUP-TPL",
+        attributes: { 尺寸: "32×24×18cm", 颜色: " 白色 " },
+      }),
+    /相同商品身份/,
+  );
+  s = act(s, "submitSku", {
+    ...input,
+    code: "TPL-02",
+    attributes: { ...input.attributes, 颜色: "蓝色" },
+  });
+  assert.notEqual(s.skus[1].fingerprint, s.skus[2].fingerprint);
+  const disabled = act(s, "setStandardStatus", {
+    kind: "category",
+    id: template.id,
+    active: false,
+  });
+  assert.throws(
+    () => act(disabled, "submitSku", { ...input, code: "TPL-03" }),
+    /请选择启用/,
+  );
+  assert.throws(
+    () =>
+      act(disabled, "reviewSku", {
+        id: s.skus[1].id,
+        status: "active",
+        note: "审核",
+      }),
+    /启用的品类模板/,
+  );
+  assert.equal(disabled.skus[0].status, "active", "不重写历史生效商品");
+});
+
+test("历史待审 SKU 不可跳过新模板审核，原型属性不能充当必填值", () => {
+  let s = act(fixture(), "submitSku", {
+    ...sku,
+    code: "OLD-PENDING",
+    model: "OTHER",
+  });
+  s = act(s, "createCategoryTemplate", {
+    name: "属性校验",
+    attributes: ["toString"],
+  });
+  assert.throws(
+    () =>
+      act(s, "reviewSku", { id: s.skus[1].id, status: "active", note: "审核" }),
+    /启用的品类模板/,
+  );
+  assert.throws(
+    () =>
+      act(s, "submitSku", {
+        ...sku,
+        code: "PROTOTYPE",
+        category: "属性校验",
+        categoryTemplateId: s.categoryTemplates[0].id,
+        attributes: { unrelated: "value" },
+      }),
+    /全部属性/,
+  );
+});
+
+test("标准交货点使用服务端地址；自由地址需重新选择，停用立即排除并禁止续期", () => {
+  let s = activeOffer();
+  const oid = s.offers[0].id;
+  s = act(s, "createDeliveryPoint", {
+    name: "测试核实仓",
+    address: "测试地址一号",
+  });
+  const point = s.deliveryPoints[0];
+  assert.match(offerAvailability(s, s.offers[0], now), /交货点待标准化/);
+  assert.throws(
+    () =>
+      act(s, "saveOffer", {
+        ...offerFor(s),
+        id: oid,
+        expectedVersion: s.offers[0].version,
+      }),
+    /交货点待标准化/,
+  );
+  s = act(s, "saveOffer", {
+    ...offerFor(s),
+    id: oid,
+    expectedVersion: s.offers[0].version,
+    deliveryPointId: point.id,
+    deliveryLocation: "客户端伪造地址",
+  });
+  assert.equal(s.offers[0].deliveryLocation, deliveryLabel(point));
+  assert.equal(offerAvailability(s, s.offers[0], now), "可参与匹配");
+  s = act(s, "setStandardStatus", {
+    kind: "delivery",
+    id: point.id,
+    active: false,
+  });
+  assert.match(offerAvailability(s, s.offers[0], now), /交货点已停用/);
+  assert.equal(matchesSupplyFilter(s, s.offers[0], "available", now), false);
+  assert.throws(
+    () =>
+      act(
+        s,
+        "updateOfferTerms",
+        {
+          id: oid,
+          expectedVersion: s.offers[0].version,
+          validUntil: "2026-10-25",
+          conditionsConfirmed: true,
+        },
+        "merchantA",
+      ),
+    /交货点已停用/,
+  );
+  assert.throws(
+    () =>
+      act(s, "saveOffer", {
+        ...offerFor(s),
+        id: oid,
+        expectedVersion: s.offers[0].version,
+        deliveryPointId: point.id,
+      }),
+    /交货点已停用/,
+  );
+  s = act(s, "setStandardStatus", {
+    kind: "delivery",
+    id: point.id,
+    active: true,
+  });
+  assert.equal(offerAvailability(s, s.offers[0], now), "可参与匹配");
+});
+
+test("旧数据不自动确认数量；等量确认可升级口径，改价不确认，运营代录必须留证", () => {
+  let s = activeOffer();
+  delete s.categoryTemplates;
+  delete s.deliveryPoints;
+  delete s.offers[0].quantityBasis;
+  const oid = s.offers[0].id;
+  assert.match(offerAvailability(s, s.offers[0], now), /数量口径待确认/);
+  const changed = act(
+    s,
+    "updateOfferTerms",
+    { id: oid, expectedVersion: s.offers[0].version, unitPrice: 1000 },
+    "merchantA",
+  );
+  assert.match(
+    offerAvailability(changed, changed.offers[0], now),
+    /数量口径待确认/,
+  );
+  const confirm = {
+    id: oid,
+    expectedVersion: s.offers[0].version,
+    availableQuantity: s.offers[0].availableQuantity,
+  };
+  assert.throws(
+    () => act(s, "updateOfferTerms", confirm, "merchantA"),
+    /请确认/,
+  );
+  const next = act(
+    s,
+    "updateOfferTerms",
+    { ...confirm, conditionsConfirmed: true },
+    "merchantA",
+  );
+  assert.equal(next.offers[0].quantityBasis, QUANTITY_BASIS);
+  assert.equal(next.offers[0].version, s.offers[0].version + 1);
+  assert.equal(offerAvailability(next, next.offers[0], now), "可参与匹配");
+  assert.match(next.events[0].detail, /已确认自由可供/);
+  assert.equal(s.offers[0].quantityBasis, undefined);
+  const { confirmationNote, ...withoutNote } = offerFor(s, 1);
+  assert.throws(() => act(s, "saveOffer", withoutNote), /核实的依据/);
+  const { conditionsConfirmed, ...withoutConsent } = offerFor(s, 1);
+  assert.throws(
+    () => act(s, "saveOffer", withoutConsent, "merchantB"),
+    /请确认/,
+  );
+});
 export function fixture() {
   let s = emptyCatalog("owner", "人民币含税商品供货价，运费另计");
   s = applyApplication(s, "merchantA", merchant, now);
@@ -73,6 +357,8 @@ export function offerFor(s, i = 0) {
     leadDays: 3,
     deliveryLocation: "示例昆明仓",
     validUntil: "2026-10-20",
+    conditionsConfirmed: true,
+    confirmationNote: "测试中已核实供货条件",
   };
 }
 
@@ -327,6 +613,7 @@ test("快捷改价改量保留商品约束，校验账号与版本，运营代�
     id: o.id,
     expectedVersion: o.version,
     availableQuantity: 260,
+    conditionsConfirmed: true,
   };
   const changed = act(s, "updateOfferTerms", payload, "merchantA");
   assert.equal(changed.offers[0].availableQuantity, 260);
