@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Access, CatalogState, CatalogView, Offer, Sku } from "./types";
+import { deliveryIssue, deliveryLabel, QUANTITY_BASIS } from "./standards.ts";
 
 export class CatalogError extends Error {
   status: number;
@@ -43,6 +44,8 @@ const skuInput = z
     ),
     name: required,
     category: required,
+    categoryTemplateId: required.optional(),
+    attributes: z.record(required, required).optional(),
     origin: required,
     model: required,
     material: required,
@@ -77,8 +80,13 @@ const offerInput = z
     minimumQuantity: count,
     quantityStep: count,
     leadDays: z.number().int().min(0).max(365),
-    deliveryLocation: required,
+    deliveryLocation: z.string().trim().min(1).max(300),
+    deliveryPointId: required.optional(),
     validUntil: date,
+    conditionsConfirmed: z.literal(true, {
+      errorMap: () => ({ message: "请确认供货数量口径及供货条件" }),
+    }),
+    confirmationNote: z.string().trim().max(1000).optional(),
   })
   .strict();
 const normalize = (s: string) =>
@@ -101,6 +109,8 @@ export function emptyCatalog(
     events: [],
     members: [],
     accessInvitations: [],
+    categoryTemplates: [],
+    deliveryPoints: [],
   };
 }
 
@@ -166,7 +176,7 @@ export function viewCatalog(state: CatalogState, userId: string): CatalogView {
 }
 
 export function offerAvailability(
-  state: Pick<CatalogState, "merchants" | "skus">,
+  state: Pick<CatalogState, "merchants" | "skus" | "deliveryPoints">,
   offer: Offer,
   now = new Date(),
 ) {
@@ -185,6 +195,9 @@ export function offerAvailability(
       } as const
     )[offer.status];
   if (offer.validUntil < today(now)) return "报价已过期";
+  if (offer.quantityBasis !== QUANTITY_BASIS) return "供货数量口径待确认";
+  const locationIssue = deliveryIssue(state, offer);
+  if (locationIssue) return locationIssue;
   const firstPack =
     Math.ceil(offer.minimumQuantity / offer.quantityStep) * offer.quantityStep;
   if (offer.availableQuantity < firstPack) return "可供量不足起订要求";
@@ -279,6 +292,89 @@ export function applyCatalogCommand(
   let detail = "";
   let label = "";
   switch (action) {
+    case "createCategoryTemplate": {
+      ensure(
+        access.role === "operations" && access.isOwner,
+        "只有管理员可以维护货盘标准",
+        403,
+      );
+      const p = z
+        .object({
+          name: required,
+          attributes: z.array(z.string().trim().min(1).max(40)).min(1).max(12),
+        })
+        .strict()
+        .parse(payload);
+      ensure(
+        new Set(p.attributes.map(normalize)).size === p.attributes.length,
+        "品类属性不能重复",
+      );
+      ensure(
+        !p.attributes.some((a) =>
+          ["__proto__", "constructor", "prototype"].includes(a),
+        ),
+        "属性名称不可用",
+      );
+      state.categoryTemplates ||= [];
+      ensure(
+        !state.categoryTemplates.some(
+          (t) => normalize(t.name) === normalize(p.name),
+        ),
+        "品类模板名称已存在，请使用不同版本名称",
+      );
+      target = id("category");
+      state.categoryTemplates.push({ ...p, id: target, active: true });
+      label = "建立品类模板";
+      detail = `${p.name}：${p.attributes.join("、")}`;
+      break;
+    }
+    case "createDeliveryPoint": {
+      ensure(
+        access.role === "operations" && access.isOwner,
+        "只有管理员可以维护货盘标准",
+        403,
+      );
+      const p = z
+        .object({ name: z.string().trim().min(1).max(60), address: required })
+        .strict()
+        .parse(payload);
+      state.deliveryPoints ||= [];
+      ensure(
+        !state.deliveryPoints.some(
+          (d) => normalize(d.name) === normalize(p.name),
+        ),
+        "交货点名称已存在",
+      );
+      target = id("delivery");
+      state.deliveryPoints.push({ ...p, id: target, active: true });
+      label = "建立标准交货点";
+      detail = `${p.name} · ${p.address}`;
+      break;
+    }
+    case "setStandardStatus": {
+      ensure(
+        access.role === "operations" && access.isOwner,
+        "只有管理员可以维护货盘标准",
+        403,
+      );
+      const p = z
+        .object({
+          kind: z.enum(["category", "delivery"]),
+          id: required,
+          active: z.boolean(),
+        })
+        .strict()
+        .parse(payload);
+      const entry = (
+        p.kind === "category" ? state.categoryTemplates : state.deliveryPoints
+      )?.find((e) => e.id === p.id);
+      ensure(entry, "标准不存在", 404);
+      entry.active = p.active;
+      target = entry.id;
+      label = p.active ? "启用货盘标准" : "停用货盘标准";
+      detail = `${p.kind === "category" ? "品类" : "交货点"}：${entry.name}`;
+      break;
+    }
     case "updateSkuImage": {
       const p = z
         .object({ id: required, imageUrl: skuInput.shape.imageUrl })
@@ -372,6 +468,13 @@ export function applyCatalogCommand(
         state.skus.find((s) => s.id === o.skuId)?.status === "active",
         "SKU 未生效",
       );
+      ensure(
+        !deliveryIssue(state, o),
+        deliveryIssue(state, o) || "交货点需核实",
+      );
+      if (p.availableQuantity !== undefined || p.validUntil !== undefined) {
+        ensure(p.conditionsConfirmed === true, "请确认供货数量口径及供货条件");
+      }
       const fields = [
         "unitPrice",
         "availableQuantity",
@@ -395,6 +498,13 @@ export function applyCatalogCommand(
       if (access.role === "operations")
         ensure(p.confirmationNote, "请记录与商户核实的依据");
       const changes: string[] = [];
+      if (
+        (p.availableQuantity !== undefined || p.validUntil !== undefined) &&
+        o.quantityBasis !== QUANTITY_BASIS
+      ) {
+        o.quantityBasis = QUANTITY_BASIS;
+        changes.push("已确认自由可供数量口径");
+      }
       for (const field of fields) {
         const value = p[field];
         if (value !== undefined && value !== o[field]) {
@@ -456,6 +566,21 @@ export function applyCatalogCommand(
         .strict()
         .parse(payload);
       const { id: updateId, ...p } = parsed;
+      const templates = state.categoryTemplates || [];
+      if (templates.length || p.categoryTemplateId) {
+        const template = templates.find(
+          (t) => t.id === p.categoryTemplateId && t.active,
+        );
+        ensure(template, "请选择启用的品类模板");
+        ensure(p.category === template.name, "商品品类与模板不一致");
+        ensure(
+          p.attributes &&
+            Object.keys(p.attributes).length === template.attributes.length &&
+            template.attributes.every((a) => Object.hasOwn(p.attributes!, a)),
+          "请完整填写模板中的全部属性，不可增加未定义属性",
+        );
+      } else
+        ensure(!Object.keys(p.attributes || {}).length, "品类属性需要关联模板");
       const existing =
         action === "updateSku"
           ? state.skus.find((s) => s.id === updateId)
@@ -477,18 +602,23 @@ export function applyCatalogCommand(
         !state.skus.some((s) => s.id !== existing?.id && s.code === code),
         "SKU 编码已存在，请关联已有 SKU",
       );
-      const fingerprint = JSON.stringify(
-        [
-          p.category,
-          p.origin,
-          p.model,
-          p.material,
-          p.specification,
-          p.quality,
-          p.unit,
-          p.packaging,
-        ].map(normalize),
-      );
+      const identity: unknown[] = [
+        p.category,
+        p.origin,
+        p.model,
+        p.material,
+        p.specification,
+        p.quality,
+        p.unit,
+        p.packaging,
+      ].map(normalize);
+      if (p.attributes && Object.keys(p.attributes).length)
+        identity.push(
+          Object.entries(p.attributes)
+            .map(([k, v]) => [normalize(k), normalize(v)])
+            .sort(([a], [b]) => a.localeCompare(b)),
+        );
+      const fingerprint = JSON.stringify(identity);
       ensure(
         !state.skus.some(
           (s) =>
@@ -529,6 +659,17 @@ export function applyCatalogCommand(
         .parse(payload);
       const s = state.skus.find((s) => s.id === p.id);
       ensure(s, "SKU 不存在", 404);
+      if (
+        p.status === "active" &&
+        s.status !== "active" &&
+        state.categoryTemplates?.length
+      )
+        ensure(
+          state.categoryTemplates.some(
+            (t) => t.id === s.categoryTemplateId && t.active,
+          ),
+          "请选择启用的品类模板并修改待审核商品后重提",
+        );
       if (p.status === "active")
         ensure(
           !state.skus.some(
@@ -556,6 +697,15 @@ export function applyCatalogCommand(
     case "saveOffer": {
       approvedMerchant();
       const p = offerInput.parse(payload);
+      if (access.role === "operations")
+        ensure(p.confirmationNote, "请记录与商户核实的依据");
+      ensure(
+        !deliveryIssue(state, p),
+        deliveryIssue(state, p) || "请选择标准交货点",
+      );
+      const point = state.deliveryPoints?.find(
+        (d) => d.id === p.deliveryPointId,
+      );
       ensure(
         access.role === "operations" || p.merchantId === access.merchantId,
         "不能维护其他商户的供货报价",
@@ -594,11 +744,19 @@ export function applyCatalogCommand(
           "该商户已为此 SKU 建立报价，请编辑原报价",
         );
       }
-      const { id: _id, expectedVersion: _version, ...fields } = p;
+      const {
+        id: _id,
+        expectedVersion: _version,
+        conditionsConfirmed: _confirmed,
+        confirmationNote,
+        ...fields
+      } = p;
       target = existing?.id || id("offer");
       merchantId = p.merchantId;
       const offer: Offer = {
         ...fields,
+        deliveryLocation: point ? deliveryLabel(point) : p.deliveryLocation,
+        quantityBasis: QUANTITY_BASIS,
         id: target,
         status: existing?.status === "active" ? "active" : "pending",
         version: (existing?.version || 0) + 1,
@@ -608,7 +766,7 @@ export function applyCatalogCommand(
       if (existing) Object.assign(existing, offer);
       else state.offers.push(offer);
       label = existing ? "更新供货条件" : "提交供货关联";
-      detail = `${p.merchantCode} · v${offer.version} · ${p.unitPrice}分 · 可供${p.availableQuantity} · ${p.validUntil}到期`;
+      detail = `${p.merchantCode} · v${offer.version} · ${p.unitPrice}分 · 自由可供${p.availableQuantity} · ${p.validUntil}到期 · 已确认供货口径${confirmationNote ? ` · 核实依据：${confirmationNote}` : ""}`;
       break;
     }
     case "reviewOffer": {
@@ -641,6 +799,13 @@ export function applyCatalogCommand(
         p.status !== "active" || o.validUntil >= today(now),
         "报价已过期，请先更新",
       );
+      if (p.status === "active") {
+        ensure(o.quantityBasis === QUANTITY_BASIS, "请先确认供货数量口径");
+        ensure(
+          !deliveryIssue(state, o),
+          deliveryIssue(state, o) || "交货点需核实",
+        );
+      }
       o.status = p.status;
       o.reviewNote = p.note;
       o.version++;

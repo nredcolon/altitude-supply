@@ -11,7 +11,7 @@ export type SupplyFilter =
   | "attention";
 
 export function supplyHealth(
-  state: Pick<CatalogState, "merchants" | "skus">,
+  state: Pick<CatalogState, "merchants" | "skus" | "deliveryPoints">,
   offer: Offer,
   now = new Date(),
 ) {
@@ -26,7 +26,7 @@ export function supplyHealth(
 }
 
 export function matchesSupplyFilter(
-  state: Pick<CatalogState, "merchants" | "skus">,
+  state: Pick<CatalogState, "merchants" | "skus" | "deliveryPoints">,
   offer: Offer,
   filter: SupplyFilter,
   now = new Date(),

@@ -1,5 +1,47 @@
 @import "tailwindcss";
 
+.standards-settings {
+  display: grid;
+  gap: 20px;
+}
+.standard-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+.standard-row div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.standard-row p {
+  margin: 6px 0;
+}
+.standard-row small {
+  color: var(--muted);
+}
+.standard-row button {
+  flex-shrink: 0;
+}
+.standard-form {
+  display: grid;
+  gap: 16px;
+  max-width: 640px;
+  padding-top: 22px;
+}
+.standard-form button {
+  justify-self: start;
+}
+@media (max-width: 700px) {
+  .standard-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
 .portal {
   max-width: 1200px;
   margin: 0 auto;

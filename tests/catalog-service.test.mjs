@@ -138,6 +138,126 @@ const requestAccess = (invitationCode) => ({
   invitationCode,
   payload: claimant,
 });
+
+test("货盘标准通过真实服务持久化，成员可读而不可越权维护，陈旧配置不覆盖新标准", async () => {
+  const { call, seed, sqlite } = setup();
+  const initial = await seed();
+  let w = initial.body.workspace;
+  const category = await call(
+    "owner",
+    cmd(w, "createCategoryTemplate", {
+      name: "测试杯具",
+      attributes: ["容量", "颜色"],
+    }),
+  );
+  assert.equal(category.status, 200, category.body.error);
+  w = category.body.workspace;
+  const template = w.data.categoryTemplates[0];
+  const stale = await call(
+    "owner",
+    cmd(initial.body.workspace, "createDeliveryPoint", {
+      name: "过期提交",
+      address: "不应保存",
+    }),
+  );
+  assert.equal(stale.status, 409);
+  const pointResult = await call(
+    "owner",
+    cmd(w, "createDeliveryPoint", { name: "测试交货点", address: "测试地址" }),
+  );
+  assert.equal(pointResult.status, 200);
+  w = pointResult.body.workspace;
+  const joined = await call("merchant", {
+    action: "applyMerchant",
+    invitationCode: initial.body.invitationCode,
+    payload: application,
+  });
+  assert.equal(joined.status, 201);
+  assert.deepEqual(joined.body.workspace.data.categoryTemplates[0].attributes, [
+    "容量",
+    "颜色",
+  ]);
+  assert.equal(
+    (
+      await call(
+        "merchant",
+        cmd(joined.body.workspace, "setStandardStatus", {
+          kind: "category",
+          id: template.id,
+          active: false,
+        }),
+      )
+    ).status,
+    403,
+  );
+  w = (await call("owner")).body.workspace;
+  w = (
+    await call(
+      "owner",
+      cmd(w, "reviewMerchant", {
+        id: w.data.merchants[0].id,
+        status: "active",
+        note: "测试核实",
+      }),
+    )
+  ).body.workspace;
+  const skuInput = {
+    code: "SERVICE-TPL",
+    name: "测试杯",
+    category: template.name,
+    categoryTemplateId: template.id,
+    attributes: { 容量: "500ml", 颜色: "白色" },
+    origin: "测试来源",
+    model: "T1",
+    material: "测试材质",
+    specification: "测试规格",
+    quality: "测试标准",
+    unit: "件",
+    packaging: "单件",
+    imageUrl: "",
+  };
+  const created = await call("merchant", cmd(w, "submitSku", skuInput));
+  assert.equal(created.status, 200, created.body.error);
+  w = created.body.workspace;
+  w = (
+    await call(
+      "owner",
+      cmd(w, "reviewSku", {
+        id: w.data.skus[0].id,
+        status: "active",
+        note: "已核实同款",
+      }),
+    )
+  ).body.workspace;
+  const offer = {
+    skuId: w.data.skus[0].id,
+    merchantId: w.data.merchants[0].id,
+    merchantCode: "M1",
+    unitPrice: 1200,
+    availableQuantity: 40,
+    minimumQuantity: 10,
+    quantityStep: 10,
+    leadDays: 2,
+    deliveryLocation: "客户端地址",
+    deliveryPointId: w.data.deliveryPoints[0].id,
+    validUntil: "2026-10-20",
+    conditionsConfirmed: true,
+  };
+  const saved = await call("merchant", cmd(w, "saveOffer", offer));
+  assert.equal(saved.status, 200, saved.body.error);
+  w = saved.body.workspace;
+  assert.equal(w.data.offers[0].deliveryLocation, "测试交货点 · 测试地址");
+  assert.equal(w.data.offers[0].quantityBasis, "free-supply-v1");
+  const persisted = JSON.parse(
+    sqlite.prepare("SELECT data FROM catalog_workspaces WHERE id = ?").get(w.id)
+      .data,
+  );
+  assert.equal(persisted.skus[0].attributes.容量, "500ml");
+  assert.equal(persisted.offers[0].availableQuantity, 40);
+  assert.equal(persisted.categoryTemplates[0].active, true);
+  assert.equal(persisted.deliveryPoints.length, 1);
+  sqlite.close();
+});
 const inspectAccess = (invitationCode) => ({
   action: "inspectAccessInvitation",
   invitationCode,

@@ -34,6 +34,15 @@ import {
 } from "../../lib/catalog/maintenance";
 import { ImageField } from "./image-field";
 import { AccessManagement } from "./access-management";
+import {
+  StandardsSettings,
+  SkuCategoryFields,
+  DeliveryPointField,
+} from "./standards-settings";
+import {
+  deliveryLabel,
+  QUANTITY_EXPLANATION,
+} from "../../lib/catalog/standards";
 import type { Portal } from "../../lib/catalog/platform";
 import type {
   CatalogResponse,
@@ -65,8 +74,12 @@ const pageNames: Record<string, string> = {
   detail: "SKU 供货详情",
   profile: "我的商户",
   members: "账号与成员",
+  standards: "货盘标准",
 };
-const categories = ["家居日用", "家纺布艺", "箱包配饰", "其他"];
+const attributeSummary = (sku: Sku) =>
+  Object.entries(sku.attributes || {})
+    .map(([label, value]) => `${label}：${value}`)
+    .join(" · ");
 
 export default function CatalogApp({
   displayName,
@@ -498,7 +511,7 @@ export default function CatalogApp({
             : field === "unitPrice"
               ? Math.round(n(field) * 100)
               : n(field),
-        ...(field === "validUntil"
+        ...(field === "validUntil" || field === "availableQuantity"
           ? { conditionsConfirmed: form.get("conditionsConfirmed") === "on" }
           : {}),
         ...(ops ? { confirmationNote: s("confirmationNote") } : {}),
@@ -516,6 +529,9 @@ export default function CatalogApp({
         },
       );
     if (dialog?.type === "sku") {
+      const template = data?.categoryTemplates?.find(
+        (t) => t.id === s("categoryTemplateId"),
+      );
       const fields = [
         "code",
         "name",
@@ -531,11 +547,25 @@ export default function CatalogApp({
       ];
       return void command(dialog.item ? "updateSku" : "submitSku", {
         ...Object.fromEntries(fields.map((key) => [key, s(key)])),
+        ...(template
+          ? {
+              categoryTemplateId: template.id,
+              attributes: Object.fromEntries(
+                template.attributes.map((label, index) => [
+                  label,
+                  s(`attribute-${index}`),
+                ]),
+              ),
+            }
+          : {}),
         ...(dialog.item ? { id: dialog.item.id } : {}),
       });
     }
     if (dialog?.type === "offer") {
       const o = dialog.item as Offer | undefined;
+      const point = data?.deliveryPoints?.find(
+        (p) => p.id === s("deliveryPointId"),
+      );
       return void command("saveOffer", {
         ...(o ? { id: o.id, expectedVersion: o.version } : {}),
         skuId: o?.skuId || s("skuId"),
@@ -547,8 +577,11 @@ export default function CatalogApp({
         minimumQuantity: n("minimumQuantity"),
         quantityStep: n("quantityStep"),
         leadDays: n("leadDays"),
-        deliveryLocation: s("deliveryLocation"),
+        deliveryLocation: point ? deliveryLabel(point) : s("deliveryLocation"),
+        ...(point ? { deliveryPointId: point.id } : {}),
         validUntil: s("validUntil"),
+        conditionsConfirmed: form.get("conditionsConfirmed") === "on",
+        ...(ops ? { confirmationNote: s("confirmationNote") } : {}),
       });
     }
     if (dialog?.type === "review")
@@ -835,6 +868,8 @@ export default function CatalogApp({
         )}
       </div>
     );
+  } else if (page === "standards" && ops) {
+    content = <StandardsSettings data={data} busy={busy} command={command} />;
   } else if (page === "members" && ops) {
     content = (
       <AccessManagement
@@ -867,7 +902,7 @@ export default function CatalogApp({
           {data.skus
             .filter(
               (s) =>
-                matches(s.name, s.code, s.specification) &&
+                matches(s.name, s.code, s.specification, attributeSummary(s)) &&
                 (statusFilter === "all" ||
                   s.status === statusFilter ||
                   (statusFilter === "missing-image" && !s.imageUrl)),
@@ -901,6 +936,9 @@ export default function CatalogApp({
                     <ArrowRight size={17} />
                   </button>
                   <p>{s.specification}</p>
+                  {attributeSummary(s) && (
+                    <p className="note">{attributeSummary(s)}</p>
+                  )}
                   <div className="sku-foot">
                     <span>
                       {data.offers.filter((o) => o.skuId === s.id).length}{" "}
@@ -970,6 +1008,7 @@ export default function CatalogApp({
                 ["质量标准", sku.quality],
                 ["计量单位", sku.unit],
                 ["包装", sku.packaging],
+                ...Object.entries(sku.attributes || {}),
               ].map(([k, v]) => (
                 <div key={k}>
                   <dt>{k}</dt>
@@ -1132,6 +1171,7 @@ export default function CatalogApp({
                       icon: ClipboardList,
                     },
                     { id: "activity", name: "操作记录", icon: ShieldCheck },
+                    { id: "standards", name: "货盘标准", icon: Layers3 },
                     {
                       id: "members",
                       name: `账号与成员${data.accessInvitations.some((i) => i.status === "requested") ? " · 待核实" : ""}`,
@@ -1386,7 +1426,7 @@ export default function CatalogApp({
               </div>
             ) : (
               <>
-                {!["overview", "detail"].includes(page) && (
+                {!["overview", "detail", "standards"].includes(page) && (
                   <label className="search">
                     <Search size={17} />
                     <input
@@ -1564,6 +1604,20 @@ export default function CatalogApp({
                       />
                     </Field>
                   )}
+                  {(dialog.field === "availableQuantity" ||
+                    dialog.field === "validUntil") && (
+                    <p className="notice">{QUANTITY_EXPLANATION}</p>
+                  )}
+                  {dialog.field === "availableQuantity" && (
+                    <label className="checkbox-row">
+                      <input
+                        name="conditionsConfirmed"
+                        type="checkbox"
+                        required
+                      />
+                      我已核实，此数量符合上述供货口径。
+                    </label>
+                  )}
                   {supplyHealth(data!, offer).expired &&
                     dialog.field !== "validUntil" && (
                       <p className="note">
@@ -1614,13 +1668,10 @@ export default function CatalogApp({
                         maxLength={200}
                       />
                     </Field>
-                    <Field label="品类">
-                      <select name="category" defaultValue={skuEdit?.category}>
-                        {categories.map((c) => (
-                          <option key={c}>{c}</option>
-                        ))}
-                      </select>
-                    </Field>
+                    <SkuCategoryFields
+                      templates={data?.categoryTemplates || []}
+                      sku={skuEdit}
+                    />
                     <Field label="品牌 / 生产来源">
                       <input
                         name="origin"
@@ -1707,6 +1758,9 @@ export default function CatalogApp({
                           .map((s) => (
                             <option key={s.id} value={s.id}>
                               {s.code} · {s.name} · {s.specification}
+                              {attributeSummary(s)
+                                ? ` · ${attributeSummary(s)}`
+                                : ""}
                             </option>
                           ))}
                       </select>
@@ -1749,7 +1803,7 @@ export default function CatalogApp({
                         defaultValue={offer ? offer.unitPrice / 100 : ""}
                       />
                     </Field>
-                    <Field label="可供数量">
+                    <Field label="可供数量" hint={QUANTITY_EXPLANATION}>
                       <input
                         name="availableQuantity"
                         type="number"
@@ -1796,16 +1850,7 @@ export default function CatalogApp({
                         defaultValue={offer?.leadDays ?? 3}
                       />
                     </Field>
-                    <Field label="国内交货地点" wide>
-                      <input
-                        name="deliveryLocation"
-                        required
-                        defaultValue={
-                          offer?.deliveryLocation || "螺蛳湾商户档口交货"
-                        }
-                        maxLength={200}
-                      />
-                    </Field>
+                    <DeliveryPointField data={data!} offer={offer} />
                     <Field label="报价有效至">
                       <input
                         name="validUntil"
@@ -1815,6 +1860,25 @@ export default function CatalogApp({
                         defaultValue={offer?.validUntil || dateAfter(7)}
                       />
                     </Field>
+                    {ops && (
+                      <Field label="与商户核实的依据" wide>
+                        <textarea
+                          name="confirmationNote"
+                          required
+                          rows={3}
+                          maxLength={1000}
+                          placeholder="记录核实时间、联系人及确认结果"
+                        />
+                      </Field>
+                    )}
+                    <label className="checkbox-row wide">
+                      <input
+                        name="conditionsConfirmed"
+                        type="checkbox"
+                        required
+                      />
+                      我已核实商品、供货价、自由可供数量、交期及有效期。
+                    </label>
                   </div>
                 </>
               )}
